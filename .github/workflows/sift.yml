@@ -23,11 +23,8 @@ jobs:
       - run: pip install seleniumbase pyautogui
       - name: 解密配置(不入库不打印)
         run: |
-          eval "$(python3 cfg_open.py)"   # 导出 GIST_ID / TARGET_URL / TOKEN_INPUT 等
-          echo "GIST_ID=$GIST_ID" >> "$GITHUB_ENV"
-          echo "TARGET_URL=$TARGET_URL" >> "$GITHUB_ENV"
-          echo "TOKEN_INPUT=$TOKEN_INPUT" >> "$GITHUB_ENV"
-          echo "配置解密 OK(字段: $(env | grep -oE '^(GIST_ID|TARGET_URL|TOKEN_INPUT)' | tr '\n' ' '))"
+          python3 cfg_open.py --write   # 写本地 config.json(在 .gitignore 里); 不走 GITHUB_ENV, 避免 run step 日志回显
+          echo "配置解密 OK(字段: $(python3 -c \"import json;print(' '.join(json.load(open('config.json'))))\"))"
       - name: Stage 1 — 抓取免费列表 + 质量预筛 + 连通测
         run: python ip_sift.py
       - name: Upload sifted list
