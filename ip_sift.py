@@ -5,8 +5,10 @@
 import os, sys, json, time, socket, struct, random, urllib.request as U
 from concurrent.futures import ThreadPoolExecutor
 
+from cfg_open import load as _cfg
+_CFG = _cfg()
 GIST_TOKEN = os.environ["GIST_TOKEN"]
-GIST_ID = os.environ["GIST_ID"]
+GIST_ID = _CFG["GIST_ID"]
 BROWSER_N = int(os.environ.get("SIFT_COUNT", "15"))   # 交给阶段2浏览器实测的数量
 GIST_FILE = "dead_pool.txt"  # 只读; good_pool.txt 由阶段2写
 
