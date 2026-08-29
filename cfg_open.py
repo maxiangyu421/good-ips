@@ -22,6 +22,12 @@ def open_config():
         print("解密失败(密钥不对?)", file=sys.stderr); sys.exit(4)
     return json.loads(out.stdout.decode())
 
+def load():
+    """脚本内取配置: 优先本地 config.json(不进 env, 不落日志), 否则退回环境变量"""
+    if os.path.exists("config.json"):
+        return {k.upper(): v for k, v in json.load(open("config.json")).items()}
+    return dict(os.environ)
+
 if __name__ == "__main__":
     cfg = open_config()
     if "--write" in sys.argv:
