@@ -1,0 +1,40 @@
+name: sift
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "浏览器实测候选数(每个约1~2分钟)"
+        default: "15"
+  schedule:
+    - cron: "0 */6 * * *"   # 6h一滚; GitHub schedule 有漂移, 实际 6~12h, 无所谓
+jobs:
+  sift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      GIST_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
+      CONFIG_KEY: ${{ secrets.CONFIG_KEY }}
+      SIFT_COUNT: ${{ inputs.count || '15' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install seleniumbase pyautogui
+      - name: 解密配置(不入库不打印)
+        run: |
+          eval "$(python3 cfg_open.py)"   # 导出 GIST_ID / TARGET_URL / TOKEN_INPUT 等
+          echo "GIST_ID=$GIST_ID" >> "$GITHUB_ENV"
+          echo "TARGET_URL=$TARGET_URL" >> "$GITHUB_ENV"
+          echo "TOKEN_INPUT=$TOKEN_INPUT" >> "$GITHUB_ENV"
+          echo "配置解密 OK(字段: $(env | grep -oE '^(GIST_ID|TARGET_URL|TOKEN_INPUT)' | tr '\n' ' '))"
+      - name: Stage 1 — 抓取免费列表 + 质量预筛 + 连通测
+        run: python ip_sift.py
+      - name: Upload sifted list
+        uses: actions/upload-artifact@v4
+        with:
+          name: sifted-${{ github.run_id }}
+          path: sifted.txt
+          if-no-files-found: ignore
+      - name: Stage 2 — 逐个真·试盾, 出token进good_pool
+        run: python sift_browser.py
