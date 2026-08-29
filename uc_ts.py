@@ -4,8 +4,10 @@
 成功后写 ts_token.txt + ts_proxy.txt(token 5分钟有效, 注册必须走同一代理)。"""
 import sys, time, os, random
 
-PAGE = os.environ.get("TARGET_URL", "")
-TOKEN_INPUT = os.environ.get("TOKEN_INPUT", "cf-turnstile-response")
+from cfg_open import load as _cfg
+_CFG = _cfg()
+PAGE = _CFG.get("TARGET_URL", "")
+TOKEN_INPUT = _CFG.get("TOKEN_INPUT", "cf-turnstile-response")
 if not PAGE:
     print("[uc] 缺 TARGET_URL(config 未解密或字段缺失)"); sys.exit(2)
 
