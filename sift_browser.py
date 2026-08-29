@@ -4,7 +4,9 @@
 每个代理一个 xvfb-run 子进程, 干净隔离; 单个预算 110s。"""
 import os, sys, subprocess
 
-GIST_TOKEN = os.environ["GIST_TOKEN"]; GIST_ID = os.environ["GIST_ID"]
+from cfg_open import load as _cfg
+_CFG = _cfg()
+GIST_TOKEN = os.environ["GIST_TOKEN"]; GIST_ID = _CFG["GIST_ID"]
 BUDGET = int(os.environ.get("SIFT_COUNT", "10"))
 
 def jreq(url, method="GET", data=None, hdrs=None, timeout=20):
