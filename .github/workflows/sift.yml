@@ -24,7 +24,7 @@ jobs:
       - name: 解密配置(不入库不打印)
         run: |
           python3 cfg_open.py --write   # 写本地 config.json(在 .gitignore 里); 不走 GITHUB_ENV, 避免 run step 日志回显
-          echo "配置解密 OK(字段: $(python3 -c \"import json;print(' '.join(json.load(open('config.json'))))\"))"
+          echo "配置解密 OK(字段数: $(python3 -c 'import json;print(len(json.load(open("config.json"))))'))"
       - name: Stage 1 — 抓取免费列表 + 质量预筛 + 连通测
         run: python ip_sift.py
       - name: Upload sifted list
