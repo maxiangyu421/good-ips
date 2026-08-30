@@ -67,7 +67,7 @@ if __name__ == "__main__":
     if new_good:
         gist_patch({"good_pool.txt": {"content": "\n".join((new_good + good)[:10])}})
     if new_dead:
-        gist_patch({"dead_pool.txt": {"content": "\n".join((new_dead + dead)[:600])}})
+        gist_patch({"dead_pool.txt": {"content": "\n".join((new_dead + dead)[:2000])}})
     # job summary
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
         f.write(f"## 试盾结果\n- 候选 {len(cands)} / 通过 {len(passed)} / 新增优质 {len(new_good)}\n")
