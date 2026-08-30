@@ -16,7 +16,7 @@ SOURCES = [
     "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all",
     "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5/list.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
     "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
 ]
 
@@ -68,6 +68,10 @@ def ip_quality(ip_list):
         hosts = [p.split(":")[0] for p in chunk]   # ip-api 只认纯 IP, host:port 会整批无效
         st, d = jreq("http://ip-api.com/batch?fields=query,proxy,hosting,isp,country",
                      "POST", hosts, timeout=15)
+        if st != 200 or not isinstance(d, list):
+            time.sleep(4)   # 限速/瞬时失败, 重试一次
+            st, d = jreq("http://ip-api.com/batch?fields=query,proxy,hosting,isp,country",
+                         "POST", hosts, timeout=15)
         if st != 200 or not isinstance(d, list):
             print(f"[api] batch {i//15} 失败 st={st}, 整批放行(交连通性测兜底)")
             keep += chunk; continue
