@@ -142,6 +142,55 @@ def ip_quality(ip_list):
         print(f"   ★ {p} {v.get('country','')} {(v.get('isp') or '')[:38]}")
     return prime, normal, unk
 
+# ===== 二级精筛: ipapi.is (08-30 用户实测打脸后加) =====
+# ip-api 的 hosting 字段漏判严重。用户用 ping0 实测 178.130.47.21 是机房，
+# ip-api 却报 hosting=False。换 ipapi.is 复核全池 11 个 IP:
+#   178.130.47.21 / 45.95.232.35 / 147.45.60.139 / 193.25.215.182
+#   / 199.66.182.243 / 199.66.183.226   → is_datacenter=True  ❌ 机房(ip-api 全漏判)
+#   66.42.224.229 / 184.178.172.26 / 98.175.31.195 / 72.223.188.92 / 98.175.31.222 → 住宅 ✅
+# 对照组(历史真过盾成功): 184.181.217.210 / 72.195.114.169 / 72.195.101.99 全部住宅 ✅
+# → ipapi.is 的 is_datacenter 与「能否过盾」高度吻合, 作为送盾前最后一道闸。
+# 免费额度 1000/天 单查(batch 端点要付费 key, 实测 POST 返回 403), ~1.6s/个。
+# 每 45min 一轮 × 每轮 ≤25 个 = 800/天, 在配额内。
+IPIS_MAX = int(os.environ.get("IPIS_MAX", "30"))   # 每轮精筛上限(护住 1000/天 配额)
+
+def ipis_check(pxs):
+    """对候选逐个查 ipapi.is。返回 (residential, datacenter, unknown) 三组 host:port。
+    查不到的进 unknown(保留但排在住宅之后), 不因单点故障丢掉整批。"""
+    res, dc, unk = [], [], []
+    seen = {}
+    for i, px in enumerate(pxs[:IPIS_MAX]):
+        h = px.split(":")[0]
+        if h in seen:                       # 同 IP 只查一次
+            (res if seen[h] == 1 else dc if seen[h] == 0 else unk).append(px); continue
+        verdict = None
+        for attempt in range(2):
+            try:
+                r = U.Request(f"https://api.ipapi.is/?q={h}",
+                              headers={"User-Agent": "Mozilla/5.0"})
+                with U.urlopen(r, timeout=15) as resp:
+                    d = json.loads(resp.read().decode())
+                verdict = d; break
+            except Exception as e:
+                if attempt == 0: time.sleep(3)
+                else: print(f"[ipis] {h} 查询失败: {str(e)[:50]}")
+        if verdict is None:
+            seen[h] = 2; unk.append(px); continue
+        is_dc = bool(verdict.get("is_datacenter"))
+        asn = (verdict.get("asn") or {})
+        org = (asn.get("org") or (verdict.get("company") or {}).get("name") or "")
+        if is_dc:
+            seen[h] = 0; dc.append(px)
+            print(f"[ipis] ❌ 机房 {h} {org[:34]}")
+        else:
+            seen[h] = 1; res.append(px)
+            print(f"[ipis] ✅ 住宅 {h} {org[:34]}")
+        time.sleep(1.2)   # 免费额度友好节流
+    # 超出 IPIS_MAX 的部分不查, 直接归 unknown 尾部
+    unk += [p for p in pxs[IPIS_MAX:]]
+    print(f"[ipis] 精筛: 住宅 {len(res)} / 机房剔除 {len(dc)} / 未知 {len(unk)}")
+    return res, dc, unk
+
 def socks5_ok(target, timeout=7):
     """完整握手 + 连通目标, 返回(是否可用, 延迟ms)。IP-ATYP 直连(实测这批代理拒域名ATYP)。"""
     host, port = target.split(":")[0], int(target.split(":")[1])
@@ -198,13 +247,22 @@ if __name__ == "__main__":
         h = p.split(":")[0]
         if h not in seen0: dedup.append(p); seen0.add(h)
     print(f"[sift] IP 去重后 {len(dedup)} 个进质量筛")
-    prime, normal, unk = ip_quality(dedup[:900])
-    # 送盾顺序: 住宅宽带白名单 > 普通非机房 > 未知; 各档内按延迟升序
+    prime, normal, unk0 = ip_quality(dedup[:900])
     def _by_ms(lst): return [p for ms, p in sorted((results[p][1], p) for p in lst)]
-    picked = (_by_ms(prime) + _by_ms(normal) + _by_ms(unk))[:BROWSER_N]
+    # 一级(ip-api)排序后, 交二级(ipapi.is)精筛剔机房 —— ip-api 的 hosting 漏判太多
+    stage1 = _by_ms(prime) + _by_ms(normal) + _by_ms(unk0)
+    ipis_res, ipis_dc, ipis_unk = ipis_check(stage1)
+    prime_set = set(prime)
+    # 住宅确认的里面, ISP 白名单命中(Cox 等)再优先
+    res_a = [p for p in ipis_res if p in prime_set]
+    res_b = [p for p in ipis_res if p not in prime_set]
+    picked = (res_a + res_b + ipis_unk)[:BROWSER_N]   # 机房(ipis_dc)彻底不送盾
     alive = picked
-    print(f"[sift] 送盾队列: 住宅宽带 {len(prime)} + 普通 {len(normal)} + 未知 {len(unk)} "
-          f"-> 取前 {len(picked)}")
+    print(f"[sift] 送盾队列: ★住宅+白名单 {len(res_a)} + 住宅 {len(res_b)} + "
+          f"未知 {len(ipis_unk)} (机房剔除 {len(ipis_dc)}) -> 取前 {len(picked)}")
+    if ipis_dc:
+        # 机房 IP 直接写进 dead 由阶段2 累积; 这里只提示
+        print("[sift] 已剔除机房: " + ", ".join(ipis_dc[:8]))
     with open("sifted.txt", "w") as f:
         f.write("\n".join(picked))
     for p in alive[:20]:
