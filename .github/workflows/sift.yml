@@ -6,7 +6,7 @@ on:
         description: "浏览器实测候选数(每个约1~2分钟)"
         default: "15"
   schedule:
-    - cron: "0 */6 * * *"   # 6h一滚; GitHub schedule 有漂移, 实际 6~12h, 无所谓
+    - cron: "0 */2 * * *"   # 2h一滚; GitHub schedule 有漂移, 实际 2~4h, 无所谓
 jobs:
   sift:
     runs-on: ubuntu-latest
