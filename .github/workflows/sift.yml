@@ -6,11 +6,11 @@ on:
         description: "浏览器实测候选数(每个约1~2分钟)"
         default: "15"
   schedule:
-    - cron: "0 */2 * * *"   # 2h一滚; GitHub schedule 有漂移, 实际 2~4h, 无所谓
+    - cron: "0 * * * *"   # 小时级兜底; 主驱动 = VPS 定时器 dispatch(45min, 无漂移)
 jobs:
   sift:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 70
     env:
       GIST_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
       CONFIG_KEY: ${{ secrets.CONFIG_KEY }}
@@ -34,4 +34,6 @@ jobs:
           path: sifted.txt
           if-no-files-found: ignore
       - name: Stage 2 — 逐个真·试盾, 出token进good_pool
-        run: python sift_browser.py
+        run: |
+          if [ -s sifted.txt ]; then python sift_browser.py
+          else echo "本轮无新候选, 跳过试盾"; fi
