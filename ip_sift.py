@@ -15,7 +15,9 @@ GIST_FILE = "dead_pool.txt"  # 只读; good_pool.txt 由阶段2写
 SOURCES = [
     "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all",
     "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
-    
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5/list.txt",
+    "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
 ]
 
 def jreq(url, method="GET", data=None, hdrs=None, timeout=20):
@@ -104,7 +106,7 @@ if __name__ == "__main__":
     cand = [p for p in all_px if p not in dead and p not in good]
     print(f"[sift] 排除 dead {len(dead & all_px)} / 已good {len(good & all_px)}, 候选 {len(cand)}")
     random.shuffle(cand)
-    cand = cand[:400]   # ip-api 配额内; 住宅占比低, 400 足够出几十个幸存者
+    cand = cand[:600]   # ip-api 配额内(15/批 + 1.4s 间隔); 源扩到 5 个后池子更大
     keep = ip_quality(cand)
     t0 = time.time()
     with ThreadPoolExecutor(64) as ex:
