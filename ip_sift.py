@@ -221,26 +221,48 @@ if __name__ == "__main__":
     # ---- IP 级去重(关键): 免费列表里同一 IP 会挂几十个端口, 同 IP 不同端口的
     # Turnstile/CF 信誉几乎完全一致 -> 逐端口重测纯属白烧浏览器预算。
     # 实测: dead_pool 176 条只有 117 个唯一 IP, 118.145.128.100 一个 IP 烧了 23 个端口。
+    # ---- 名誉池(hall_of_fame): 历史上真过盾成功过的 IP, 永不拉黑 ----
+    # 08-30 发现的设计缺陷: 184.181.217.210 / 72.195.101.99 都是曾真过盾成功的明星 IP,
+    # 却因为某次试盾失败被写进 dead_pool 永久拉黑; 再叠加「同 IP >=2 端口失败即整段
+    # 拉黑」, 会把最好的网段自己封死。免费代理的过盾是概率事件(同一 IP 时好时坏),
+    # 单次失败不该等于永久判死。
+    fame = set(l.strip() for l in gist_file("hall_of_fame.txt").splitlines() if l.strip())
+    fame_hosts = {p.split(":")[0] for p in fame}
     dead_hosts_cnt = {}
     for p in dead:
         h = p.split(":")[0]
         dead_hosts_cnt[h] = dead_hosts_cnt.get(h, 0) + 1
-    ban_hosts = {h for h, n in dead_hosts_cnt.items() if n >= 2}   # 同 IP 两个端口都废 -> 整 IP 拉黑
-    good_hosts = {p.split(":")[0] for p in good}                   # 已有可用入口, 不再试它的其他端口
+    # 整段拉黑门槛提到 3, 且名誉池所在网段豁免
+    ban_hosts = {h for h, n in dead_hosts_cnt.items()
+                 if n >= 3 and h not in fame_hosts}
+    good_hosts = {p.split(":")[0] for p in good}
+    # 名誉池成员即使在 dead 里也放回候选(给它重新证明的机会)
+    retry_fame = [p for p in fame if p not in good]
     cand = [p for p in all_px
             if p not in dead and p not in good
             and p.split(":")[0] not in ban_hosts
             and p.split(":")[0] not in good_hosts]
+    # ---- 种子队列: 外部投喂的代理(如别人分享的住宅列表)插队优先试盾 ----
+    # 用法: 往 Gist 的 seed_queue.txt 写 host:port 每行一个; 试过一轮即清空。
+    seed = [l.strip() for l in gist_file("seed_queue.txt").splitlines() if l.strip()]
+    seed = [p for p in seed if p not in good]
+    if seed:
+        print(f"[sift] 种子队列 {len(seed)} 个插队(外部投喂)")
+    cand = seed + retry_fame + cand    # 种子 > 名誉池 > 常规候选
     print(f"[sift] 排除 dead {len(dead & all_px)} / 已good {len(good & all_px)} / "
-          f"IP级拉黑 {len(ban_hosts)} 段 + 已好 {len(good_hosts)} 段, 候选 {len(cand)}")
+          f"IP级拉黑 {len(ban_hosts)} 段 + 已好 {len(good_hosts)} 段 / "
+          f"名誉池回炉 {len(retry_fame)}, 候选 {len(cand)}")
     if len(cand) < 40:   # (源扩容后基本不触发) 高频滚动下源没刷新就没有新货, 提前收工省配额
         print(f"[sift] 新候选不足 40, 本轮跳过(不烧 ip-api 配额/浏览器预算)")
         open("sifted.txt", "w").close()
         sys.exit(0)
-    random.shuffle(cand)
+    # 优先队列(种子+名誉池)不参与 shuffle/截断, 保证一定被测到
+    prio = seed + retry_fame
+    rest = [p for p in cand if p not in set(prio)]
+    random.shuffle(rest)
     # 流程反转(08-30): 源扩到 ~10 万后, ip-api 成了最贵一环(15 请求/分钟)。
     # 先用免费无限的 SOCKS5 握手把 6000 个候选压到几十个活的, 再花 ip-api 配额查质量。
-    cand = cand[:6000]
+    cand = prio + rest[:6000]
     t0 = time.time()
     with ThreadPoolExecutor(128) as ex:
         results = dict(zip(cand, ex.map(socks5_ok, cand)))
@@ -257,11 +279,13 @@ if __name__ == "__main__":
     # 一级(ip-api)排序后, 交二级(ipapi.is)精筛剔机房 —— ip-api 的 hosting 漏判太多
     stage1 = _by_ms(prime) + _by_ms(normal) + _by_ms(unk0)
     ipis_res, ipis_dc, ipis_unk = ipis_check(stage1)
-    prime_set = set(prime)
-    # 住宅确认的里面, ISP 白名单命中(Cox 等)再优先
-    res_a = [p for p in ipis_res if p in prime_set]
-    res_b = [p for p in ipis_res if p not in prime_set]
-    picked = (res_a + res_b + ipis_unk)[:BROWSER_N]   # 机房(ipis_dc)彻底不送盾
+    prime_set, prio_set = set(prime), set(prio)
+    # 排序: 优先队列(种子/名誉池) > ISP白名单住宅 > 其他住宅 > 未知
+    res_p = [p for p in ipis_res if p in prio_set]
+    res_a = [p for p in ipis_res if p not in prio_set and p in prime_set]
+    res_b = [p for p in ipis_res if p not in prio_set and p not in prime_set]
+    picked = (res_p + res_a + res_b + ipis_unk)[:BROWSER_N]   # 机房(ipis_dc)彻底不送盾
+    if res_p: print(f"[sift] 优先队列命中 {len(res_p)} 个进送盾队列头部")
     alive = picked
     print(f"[sift] 送盾队列: ★住宅+白名单 {len(res_a)} + 住宅 {len(res_b)} + "
           f"未知 {len(ipis_unk)} (机房剔除 {len(ipis_dc)}) -> 取前 {len(picked)}")
