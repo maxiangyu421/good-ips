@@ -62,12 +62,37 @@ if __name__ == "__main__":
             print("[stage2] 已满 4 个, 提前收工"); break
     good = [l.strip() for l in gist_file("good_pool.txt").splitlines() if l.strip()]
     dead = [l.strip() for l in gist_file("dead_pool.txt").splitlines() if l.strip()]
+    # ---- 名誉池: 只要过盾成功过一次就永久记名, 之后失败不再写进 dead ----
+    # 免费代理过盾是概率事件(同一 IP 时好时坏), 单次失败不该永久判死。
+    # 实测教训: 184.181.217.210 / 72.195.101.99 都是真过盾成功的明星 IP,
+    # 却因某次失败躺进 dead_pool 被永久排除。
+    fame = [l.strip() for l in gist_file("hall_of_fame.txt").splitlines() if l.strip()]
+    new_fame = [p for p in passed if p not in fame]
+    fame_all = set(fame) | set(new_fame)
     new_good = [p for p in passed if p not in good]
-    new_dead = [p for p in cands if p not in passed and p not in dead]
+    # 名誉池成员失败不入 dead(保留重试机会)
+    new_dead = [p for p in cands
+                if p not in passed and p not in dead and p not in fame_all]
+    skipped = [p for p in cands if p not in passed and p in fame_all]
+    if skipped:
+        print("[stage2] 名誉池成员本轮失败, 不拉黑: " + ", ".join(skipped))
+    files = {}
     if new_good:
-        gist_patch({"good_pool.txt": {"content": "\n".join((new_good + good)[:10])}})
+        files["good_pool.txt"] = {"content": "\n".join((new_good + good)[:10])}
     if new_dead:
-        gist_patch({"dead_pool.txt": {"content": "\n".join((new_dead + dead)[:2000])}})
+        files["dead_pool.txt"] = {"content": "\n".join((new_dead + dead)[:2000])}
+    if new_fame:
+        files["hall_of_fame.txt"] = {"content": "\n".join((new_fame + fame)[:200])}
+        print(f"[stage2] 名誉池 +{len(new_fame)}: " + ", ".join(new_fame))
+    # 种子队列跑过就清掉本轮已测的, 避免下轮重复烧预算
+    seedq = [l.strip() for l in gist_file("seed_queue.txt").splitlines() if l.strip()]
+    if seedq:
+        left = [p for p in seedq if p not in cands]
+        if len(left) != len(seedq):
+            files["seed_queue.txt"] = {"content": ("\n".join(left) + "\n") if left else "\n"}
+            print(f"[stage2] 种子队列消耗 {len(seedq)-len(left)} 个, 剩 {len(left)}")
+    if files:
+        gist_patch(files)
     # job summary
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
         f.write(f"## 试盾结果\n- 候选 {len(cands)} / 通过 {len(passed)} / 新增优质 {len(new_good)}\n")
