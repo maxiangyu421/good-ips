@@ -109,6 +109,10 @@ if __name__ == "__main__":
     good = set(l.strip() for l in gist_file("good_pool.txt").splitlines() if l.strip())
     cand = [p for p in all_px if p not in dead and p not in good]
     print(f"[sift] 排除 dead {len(dead & all_px)} / 已good {len(good & all_px)}, 候选 {len(cand)}")
+    if len(cand) < 40:   # 高频滚动下源没刷新就没有新货, 提前收工省配额
+        print(f"[sift] 新候选不足 40, 本轮跳过(不烧 ip-api 配额/浏览器预算)")
+        open("sifted.txt", "w").close()
+        sys.exit(0)
     random.shuffle(cand)
     cand = cand[:600]   # ip-api 配额内(15/批 + 1.4s 间隔); 源扩到 5 个后池子更大
     keep = ip_quality(cand)
