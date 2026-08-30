@@ -85,7 +85,10 @@ DC_KW = ("alibaba", "aliyun", "tencent", "huawei cloud", "amazon", "google llc",
          "microsoft", "azure", "oracle", "digitalocean", "ovh", "hetzner", "linode",
          "vultr", "contabo", "choopa", "leaseweb", "m247", "zenlayer", "datacamp",
          "colocrossing", "psychz", "performive", "secured servers", "hostinger",
-         "cloudflare", "gcore", "datacenter", "data center", "idc", " vps", "hosting")
+         "cloudflare", "gcore", "datacenter", "data center", "idc", " vps", "hosting",
+         # 08-30 实测(ipapi.is is_datacenter=True, ip-api 却报 hosting=False)补入:
+         "net2atlanta", "readydedis", "global connectivity solutions", "dedis",
+         "server", "colo", "网络科技", "bandwidth", "ipvolume", "stark industries")
 
 # 住宅宽带 ISP(过盾概率最高) —— Cox 是实测最强的一家
 RES_KW = ("cox communications", "comcast", "charter", "spectrum", "verizon", "at&t",
@@ -95,7 +98,9 @@ RES_KW = ("cox communications", "comcast", "charter", "spectrum", "verizon", "at
           "telecom italia", "kpn", "telia", "telenor", "swisscom", "chinanet",
           "china unicom", "china mobile", "china telecom", "kddi", "ntt", "softbank",
           "korea telecom", "sk broadband", "lg dacom", "bsnl", "jio", "airtel",
-          "telkom", "megafon", "mts", "beeline", "rostelecom", "komtel", "net2atlanta")
+          "telkom", "megafon", "mts", "beeline", "rostelecom", "komtel",
+          "cincinnati bell", "cox ")
+# 注: net2atlanta 曾在白名单, 08-30 实测 ipapi.is is_datacenter=True(机房) 已移除
 
 def _has(s, kws):
     s = (s or "").lower()
