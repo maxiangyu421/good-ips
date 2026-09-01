@@ -158,12 +158,43 @@ def ip_quality(ip_list):
 # 免费额度 1000/天 单查(batch 端点要付费 key, 实测 POST 返回 403), ~1.6s/个。
 # 每 45min 一轮 × 每轮 ≤25 个 = 800/天, 在配额内。
 IPIS_MAX = int(os.environ.get("IPIS_MAX", "30"))   # 每轮精筛上限(护住 1000/天 配额)
+# 09-01 ipapi.is 匿名层改版: 检测字段(is_datacenter 等)全部移到 key 层, 匿名层只剩地理信息,
+# 且 asn 变字符串(旧代码 .get 崩 = 连续 3 轮 failure 的根因)。免费账号(无需付费)给 key,
+# 1000 次/天, 与每轮 30 × 32 轮/天 = 960 配额匹配。key 存加密 config 的 IPAPI_KEY。
+IPIS_KEY = (_CFG.get("IPAPI_KEY") or os.environ.get("IPAPI_KEY") or "").strip()
+
+def _ipis_org(verdict):
+    """兼容 ipapi.is 新旧两代返回: 旧 asn={org:...}, 新 asn="AS22773 Cox..."(字符串),
+    company 也可能是 str 或 dict。永远返回字符串, 不再 .get 崩溃。"""
+    asn = verdict.get("asn")
+    if isinstance(asn, dict):
+        org = asn.get("org") or asn.get("descr") or ""
+    elif isinstance(asn, str):
+        org = asn
+    else:
+        org = ""
+    if not org:
+        comp = verdict.get("company")
+        if isinstance(comp, dict): org = comp.get("name") or ""
+        elif isinstance(comp, str): org = comp
+    return str(org)
+
+def _ipis_url(h):
+    u = f"https://api.ipapi.is/?q={h}"
+    if IPIS_KEY: u += f"&key={IPIS_KEY}"
+    return u
 
 def ipis_check(pxs):
     """对候选逐个查 ipapi.is。返回 (residential, datacenter, unknown) 三组 host:port。
-    查不到的进 unknown(保留但排在住宅之后), 不因单点故障丢掉整批。"""
+    查不到的进 unknown(保留但排在住宅之后), 不因单点故障丢掉整批。
+    09-01 起匿名层没有 is_datacenter —— 没 key 或返回里缺该字段时, 降级为
+    「不精筛, 全部归住宅组」并打警告, 宁可多送几个也别把整轮流程搞崩。"""
+    if not IPIS_KEY:
+        print("[ipis] ⚠️ 未配置 IPAPI_KEY, 跳过二级精筛(全部按 ip-api 结果送盾)")
+        return list(pxs), [], []
     res, dc, unk = [], [], []
     seen = {}
+    degraded = False
     for i, px in enumerate(pxs[:IPIS_MAX]):
         h = px.split(":")[0]
         if h in seen:                       # 同 IP 只查一次
@@ -171,7 +202,7 @@ def ipis_check(pxs):
         verdict = None
         for attempt in range(2):
             try:
-                r = U.Request(f"https://api.ipapi.is/?q={h}",
+                r = U.Request(_ipis_url(h),
                               headers={"User-Agent": "Mozilla/5.0"})
                 with U.urlopen(r, timeout=15) as resp:
                     d = json.loads(resp.read().decode())
@@ -181,9 +212,14 @@ def ipis_check(pxs):
                 else: print(f"[ipis] {h} 查询失败: {str(e)[:50]}")
         if verdict is None:
             seen[h] = 2; unk.append(px); continue
+        if "is_datacenter" not in verdict:
+            # 返回的是阉割版(匿名层格式): 无判据可用, 降级放行 + 只警告一次
+            if not degraded:
+                print("[ipis] ⚠️ 返回缺 is_datacenter(key 失效或被降级?), 本次跳过精筛防误杀")
+                degraded = True
+            seen[h] = 2; unk.append(px); continue
         is_dc = bool(verdict.get("is_datacenter"))
-        asn = (verdict.get("asn") or {})
-        org = (asn.get("org") or (verdict.get("company") or {}).get("name") or "")
+        org = _ipis_org(verdict)
         if is_dc:
             seen[h] = 0; dc.append(px)
             print(f"[ipis] ❌ 机房 {h} {org[:34]}")
