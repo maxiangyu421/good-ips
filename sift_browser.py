@@ -78,7 +78,7 @@ if __name__ == "__main__":
         print("[stage2] 名誉池成员本轮失败, 不拉黑: " + ", ".join(skipped))
     files = {}
     if new_good:
-        files["good_pool.txt"] = {"content": "\n".join((new_good + good)[:10])}
+        files["good_pool.txt"] = {"content": "\n".join(new_good + good)}   # 无上限(09-07 用户要求), 面板翻页展示
     if new_dead:
         files["dead_pool.txt"] = {"content": "\n".join((new_dead + dead)[:2000])}
     if new_fame:
