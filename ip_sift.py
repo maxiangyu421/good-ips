@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""阶段1: 免费socks5抓取 → ip-api 质量预筛(只留住宅/ISP) → SOCKS5握手+连通实测 → sifted.txt
+"""阶段1: 免费socks5抓取 → ip-api 质量预筛(只留住宅/ISP) → SOCKS5握手+连通实测 → ipapi.is精筛 → ping0真实出口实测 → sifted.txt
 不依赖浏览器; 阶段2(sift_browser.py)再用 uc_ts.py 逐个真·试盾。
 排除名单/优质名单都存 Gist(dead_pool.txt / good_pool.txt), 跨 run 累积。"""
-import os, sys, json, time, socket, struct, random, urllib.request as U
+import os, sys, json, time, socket, struct, random, re, ssl
+import urllib.request as U
+from html import unescape
 from concurrent.futures import ThreadPoolExecutor
 
 from cfg_open import load as _cfg
@@ -232,6 +234,99 @@ def ipis_check(pxs):
     print(f"[ipis] 精筛: 住宅 {len(res)} / 机房剔除 {len(dc)} / 未知 {len(unk)}")
     return res, dc, unk
 
+# ===== 三级半精筛: ping0.cc 走代理实测「真实出口」类型 (09-07) =====
+# ipapi.is 查的是列表 IP 的画像; 免费列表的真实出口可能不是列表 IP(落地/中转)。
+# ping0 检查 = 用候选代理自身开 socks5 隧道访问 ping0.cc/ipleak, 直接问它:
+#   家庭宽带IP ✅ / IDC机房IP ❌ —— 这是「CF 实际看到的出口」的类型, 与过盾最相关。
+# 沙盒实测过的坑(全部归 unknown, 绝不误杀):
+#   - ping0 对部分可疑出口弹 Turnstile 挑战页(challenge)
+#   - 个别 CDN 边缘证书不标准 -> CERT_NONE(只读公开画像, 无敏感数据)
+#   - 响应里 ipinfo 块偶发缺失 -> 重试一次, 仍无则 unknown
+#   - 代理瞬断/SSL EOF 常见 -> 任何异常都 unknown
+PING0_MAX = int(os.environ.get("PING0_MAX", "30"))   # 每轮实测上限(每代理一次隧道, 3~10s/个)
+P0_DROP_KW = ("机房", "IDC", "数据中心", "datacenter", "广播", "保留IP", "bogon")
+P0_GOOD_KW = ("家庭宽带", "住宅", "家宽")
+
+def _ping0_tunnel(proxy, rip, timeout=18):
+    """socks5 CONNECT(IP-ATYP, 这批代理拒域名ATYP) -> TLS(SNI=ping0.cc) -> GET /ipleak"""
+    ph, pp = proxy.split(":")[0], int(proxy.split(":")[1])
+    s = socket.create_connection((ph, pp), timeout=timeout); s.settimeout(timeout)
+    try:
+        s.sendall(b"\x05\x01\x00")
+        if s.recv(2) != b"\x05\x00": raise RuntimeError("greet")
+        s.sendall(b"\x05\x01\x00\x01" + socket.inet_aton(rip) + struct.pack(">H", 443))
+        r = s.recv(64)
+        if len(r) < 2 or r[1] != 0: raise RuntimeError("connect")
+        ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+        t = ctx.wrap_socket(s, server_hostname="ping0.cc")
+        t.sendall(b"GET /ipleak HTTP/1.1\r\nHost: ping0.cc\r\n"
+                  b"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"
+                  b"Connection: close\r\n\r\n")
+        buf = b""
+        while True:
+            c = t.recv(65536)
+            if not c: break
+            buf += c
+            if len(buf) > 300000: break
+        t.close()
+    finally:
+        try: s.close()
+        except Exception: pass
+    return buf.decode("utf-8", "ignore")
+
+def _ping0_parse(html):
+    if "cf-turnstile" in html.lower() or "aliyuncaptchaconfig" in html.lower():
+        return None   # 挑战页, 无数据
+    m = re.search(r"window\.ipinfo\s*=\s*\{(.*?)\}", html, re.DOTALL)
+    if not m: return None
+    out = {}
+    for k in ("ip", "addr", "countrycode", "asn", "org", "iptype"):
+        mm = re.search(r"\b%s:\s*'([^']*)'" % k, m.group(1))
+        if mm: out[k] = unescape(mm.group(1))
+    return out or None
+
+def ping0_check(pxs):
+    """走代理实测真实出口。返回 (pass, drop, unknown) 三组, 相对顺序保持不变。
+    只有 ping0 明确标机房才淘汰; 挑战/失败/缺数据一律 unknown(保留送盾)。"""
+    if not pxs: return [], [], []
+    rip = None
+    try:   # DoH 拿真实解析(防运行环境 DNS 污染/fake-ip), 失败再走系统 DNS
+        st, d = jreq("https://1.1.1.1/dns-query?name=ping0.cc&type=A",
+                     hdrs={"Accept": "application/dns-json"}, timeout=10)
+        if st == 200:
+            for a in (d.get("Answer") or []):
+                if a.get("type") == 1: rip = a["data"]; break
+    except Exception: pass
+    if not rip:
+        try: rip = socket.gethostbyname("ping0.cc")
+        except Exception:
+            print("[ping0] ⚠️ ping0.cc 解析失败, 本层跳过"); return list(pxs), [], []
+    keep, drop, unk = [], [], []
+    for px in pxs:
+        info = None
+        for attempt in range(2):
+            try:
+                info = _ping0_parse(_ping0_tunnel(px, rip))
+                if info: break
+            except Exception:
+                if attempt == 0: time.sleep(1)
+        if not info:
+            unk.append(px)
+            print(f"[ping0] ⚠️ {px.split(':')[0]} 挑战页/无数据/失败 -> 未知"); continue
+        t = info.get("iptype") or ""
+        tag = f"{t} {info.get('org','')[:30]}"
+        eip = info.get("ip") or ""
+        if eip and eip != px.split(":")[0]:
+            tag += f" [出口≠列表:{eip}]"
+        if any(k.lower() in t.lower() for k in P0_DROP_KW):
+            drop.append(px); print(f"[ping0] ❌ {px.split(':')[0]} {tag}")
+        else:
+            mark = "✅" if any(k in t for k in P0_GOOD_KW) else "▫️"
+            keep.append(px); print(f"[ping0] {mark} {px.split(':')[0]} {tag}")
+        time.sleep(0.5)
+    print(f"[ping0] 实测: 通过 {len(keep)} / 机房剔除 {len(drop)} / 未知 {len(unk)}")
+    return keep, drop, unk
+
 def socks5_ok(target, timeout=7):
     """完整握手 + 连通目标, 返回(是否可用, 延迟ms)。IP-ATYP 直连(实测这批代理拒域名ATYP)。"""
     host, port = target.split(":")[0], int(target.split(":")[1])
@@ -320,14 +415,17 @@ if __name__ == "__main__":
     res_p = [p for p in ipis_res if p in prio_set]
     res_a = [p for p in ipis_res if p not in prio_set and p in prime_set]
     res_b = [p for p in ipis_res if p not in prio_set and p not in prime_set]
-    picked = (res_p + res_a + res_b + ipis_unk)[:BROWSER_N]   # 机房(ipis_dc)彻底不送盾
+    pre_pick = res_p + res_a + res_b + ipis_unk      # 机房(ipis_dc)已彻底出局
+    # 三级半: ping0 走代理实测真实出口, 明确标机房的不送盾(挑战/失败归未知照送)
+    p0_keep, p0_drop, p0_unk = ping0_check(pre_pick[:PING0_MAX])
+    picked = (p0_keep + p0_unk + pre_pick[PING0_MAX:])[:BROWSER_N]
     if res_p: print(f"[sift] 优先队列命中 {len(res_p)} 个进送盾队列头部")
     alive = picked
-    print(f"[sift] 送盾队列: ★住宅+白名单 {len(res_a)} + 住宅 {len(res_b)} + "
-          f"未知 {len(ipis_unk)} (机房剔除 {len(ipis_dc)}) -> 取前 {len(picked)}")
-    if ipis_dc:
-        # 机房 IP 直接写进 dead 由阶段2 累积; 这里只提示
-        print("[sift] 已剔除机房: " + ", ".join(ipis_dc[:8]))
+    print(f"[sift] 送盾队列: ping0通过 {len(p0_keep)} + ping0未知 {len(p0_unk)} + "
+          f"未实测 {len(pre_pick) - PING0_MAX if len(pre_pick) > PING0_MAX else 0} "
+          f"-> 取前 {len(picked)} (ping0剔除 {len(p0_drop)})")
+    if ipis_dc or p0_drop:
+        print("[sift] 已剔除机房: " + ", ".join((ipis_dc + p0_drop)[:10]))
     with open("sifted.txt", "w") as f:
         f.write("\n".join(picked))
     for p in alive[:20]:
