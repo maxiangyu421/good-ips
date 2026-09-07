@@ -2,7 +2,7 @@
 """阶段2: 对 sifted.txt 逐个用 uc_ts.py(SINGLE_PROXY) 真·试 Turnstile。
 出 token → 写 Gist good_pool.txt(置顶池, 注册流程自动优先用); 失败 → 累积 dead_pool.txt。
 每个代理一个 xvfb-run 子进程, 干净隔离; 单个预算 110s。"""
-import os, sys, subprocess
+import os, sys, subprocess, json, time
 
 from cfg_open import load as _cfg
 _CFG = _cfg()
@@ -70,6 +70,28 @@ if __name__ == "__main__":
     new_fame = [p for p in passed if p not in fame]
     fame_all = set(fame) | set(new_fame)
     new_good = [p for p in passed if p not in good]
+    # ---- 优质池保鲜(09-07): 记录每个 IP 最近一次过盾时间, 超 12h 未复验就降级去 reserve 池 ----
+    # 免费代理寿命小时级, 死 IP 占名额会稀释抽样还烧 35s 超时; 降级不硬删(瞬断 IP 会复活)。
+    DEMOTE_HOURS = int(os.environ.get("DEMOTE_HOURS", "12"))
+    now_ts = int(time.time())
+    meta_raw = gist_file("good_pool_meta.json")
+    try:
+        meta = json.loads(meta_raw) if meta_raw else {}
+    except Exception:
+        meta = {}
+    for p in new_good:
+        meta[p] = now_ts
+    fresh, demoted = [], []
+    for p in good:
+        ts = meta.get(p)
+        if ts and now_ts - ts > DEMOTE_HOURS * 3600:
+            demoted.append(p)
+        else:
+            if not ts:
+                meta[p] = now_ts   # 旧条目没时间戳, 从现在起算宽限期
+            fresh.append(p)
+    if demoted:
+        print(f"[stage2] 超{DEMOTE_HOURS}h未复验, 降级 {len(demoted)} 个: " + ", ".join(demoted))
     # 名誉池成员失败不入 dead(保留重试机会)
     new_dead = [p for p in cands
                 if p not in passed and p not in dead and p not in fame_all]
@@ -77,8 +99,12 @@ if __name__ == "__main__":
     if skipped:
         print("[stage2] 名誉池成员本轮失败, 不拉黑: " + ", ".join(skipped))
     files = {}
-    if new_good:
-        files["good_pool.txt"] = {"content": "\n".join(new_good + good)}   # 无上限(09-07 用户要求), 面板翻页展示
+    if new_good or demoted:
+        files["good_pool.txt"] = {"content": "\n".join(new_good + fresh)}   # 无上限(09-07 用户要求), 面板翻页展示
+        reserve = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
+        new_reserve = [p for p in demoted if p not in reserve]
+        files["reserve_pool.txt"] = {"content": "\n".join((new_reserve + reserve)[:500])}
+        files["good_pool_meta.json"] = {"content": json.dumps(meta)}
     if new_dead:
         files["dead_pool.txt"] = {"content": "\n".join((new_dead + dead)[:2000])}
     if new_fame:
