@@ -28,8 +28,11 @@ def gist_file(name):
     return ((d.get("files") or {}).get(name, {}).get("content") or "")
 
 def gist_patch(files):
-    jreq(f"https://api.github.com/gists/{GIST_ID}", "PATCH", {"files": files},
-         {"Authorization": "token " + GIST_TOKEN})
+    st, d = jreq(f"https://api.github.com/gists/{GIST_ID}", "PATCH", {"files": files},
+                 {"Authorization": "token " + GIST_TOKEN})
+    print(f"[gist] patch status={st} files={list(files)}")   # 09-08: 不再静默, 4xx 直接暴露在日志
+    if st >= 300:
+        print(f"[gist] patch 失败详情: {json.dumps(d)[:300]}")
 
 def test_one(px):
     for f in ("ts_token.txt", "ts_proxy.txt"):
@@ -103,7 +106,11 @@ if __name__ == "__main__":
         files["good_pool.txt"] = {"content": "\n".join(new_good + fresh)}   # 无上限(09-07 用户要求), 面板翻页展示
         reserve = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
         new_reserve = [p for p in demoted if p not in reserve]
-        files["reserve_pool.txt"] = {"content": "\n".join((new_reserve + reserve)[:500])}
+        reserve_all = (new_reserve + reserve)[:500]
+        # 09-08 fix: Gist PATCH 里新建空文件(content="")会 422 且整个 patch 被静默丢弃,
+        # 此前导致所有"通过 N 个"的新 IP 从未入库。空 reserve 就不写这个文件。
+        if reserve_all:
+            files["reserve_pool.txt"] = {"content": "\n".join(reserve_all)}
         files["good_pool_meta.json"] = {"content": json.dumps(meta)}
     if new_dead:
         files["dead_pool.txt"] = {"content": "\n".join((new_dead + dead)[:2000])}
