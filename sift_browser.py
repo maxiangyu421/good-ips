@@ -65,14 +65,11 @@ if __name__ == "__main__":
             print("[stage2] 已满 4 个, 提前收工"); break
     good = [l.strip() for l in gist_file("good_pool.txt").splitlines() if l.strip()]
     dead = [l.strip() for l in gist_file("dead_pool.txt").splitlines() if l.strip()]
-    # ---- 名誉池: 只要过盾成功过一次就永久记名, 之后失败不再写进 dead ----
-    # 免费代理过盾是概率事件(同一 IP 时好时坏), 单次失败不该永久判死。
-    # 实测教训: 184.181.217.210 / 72.195.101.99 都是真过盾成功的明星 IP,
-    # 却因某次失败躺进 dead_pool 被永久排除。
-    fame = [l.strip() for l in gist_file("hall_of_fame.txt").splitlines() if l.strip()]
-    new_fame = [p for p in passed if p not in fame]
-    fame_all = set(fame) | set(new_fame)
+    # 09-10 明星机制(hall_of_fame 永赦)已按用户指示删除。
+    # 替代语义: 已 good 的 IP 复验失败 → 降级 reserve(瞬断可复活), 不进 dead;
+    # 新候选失败照旧进 dead。单次失败不再永久判死已验证 IP, 但也不再终身免检。
     new_good = [p for p in passed if p not in good]
+    fail_good = [p for p in cands if p not in passed and p in good]
     # ---- 优质池保鲜(09-07): 记录每个 IP 最近一次过盾时间, 超 12h 未复验就降级去 reserve 池 ----
     # 免费代理寿命小时级, 死 IP 占名额会稀释抽样还烧 35s 超时; 降级不硬删(瞬断 IP 会复活)。
     DEMOTE_HOURS = int(os.environ.get("DEMOTE_HOURS", "12"))
@@ -95,12 +92,16 @@ if __name__ == "__main__":
             fresh.append(p)
     if demoted:
         print(f"[stage2] 超{DEMOTE_HOURS}h未复验, 降级 {len(demoted)} 个: " + ", ".join(demoted))
-    # 名誉池成员失败不入 dead(保留重试机会)
+    # 复验失败的好 IP 一并降级(合并去重), 从 good/meta 里摘掉
+    demoted = list(dict.fromkeys(demoted + fail_good))
+    fresh = [p for p in fresh if p not in set(demoted)]
+    for p in fail_good:
+        meta.pop(p, None)
+    # 复验失败降级不进 dead(新候选失败才进 dead)
     new_dead = [p for p in cands
-                if p not in passed and p not in dead and p not in fame_all]
-    skipped = [p for p in cands if p not in passed and p in fame_all]
-    if skipped:
-        print("[stage2] 名誉池成员本轮失败, 不拉黑: " + ", ".join(skipped))
+                if p not in passed and p not in dead and p not in set(demoted)]
+    if fail_good:
+        print("[stage2] 复验失败, 降级 reserve(不拉黑): " + ", ".join(fail_good))
     files = {}
     if new_good or demoted:
         files["good_pool.txt"] = {"content": "\n".join(new_good + fresh)}   # 无上限(09-07 用户要求), 面板翻页展示
@@ -114,9 +115,6 @@ if __name__ == "__main__":
         files["good_pool_meta.json"] = {"content": json.dumps(meta)}
     if new_dead:
         files["dead_pool.txt"] = {"content": "\n".join((new_dead + dead)[:2000])}
-    if new_fame:
-        files["hall_of_fame.txt"] = {"content": "\n".join((new_fame + fame)[:200])}
-        print(f"[stage2] 名誉池 +{len(new_fame)}: " + ", ".join(new_fame))
     # 种子队列跑过就清掉本轮已测的, 避免下轮重复烧预算
     seedq = [l.strip() for l in gist_file("seed_queue.txt").splitlines() if l.strip()]
     if seedq:
