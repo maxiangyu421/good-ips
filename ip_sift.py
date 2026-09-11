@@ -360,6 +360,23 @@ if __name__ == "__main__":
         dead_hosts_cnt[h] = dead_hosts_cnt.get(h, 0) + 1
     ban_hosts = {h for h, n in dead_hosts_cnt.items() if n >= 3}
     good_hosts = {p.split(":")[0] for p in good}
+    # 09-12 回炉通道: 删明星机制后 good IP 被 good_hosts 整体排除出候选,
+    # 永远无法复验 -> meta 时间戳永不刷新 -> 12h 保鲜变全员死刑(good_pool 30→5 断崖根因)。
+    # 现把「快到期」的 good IP 插队回炉, 过盾后 stage2 刷新 meta 续命;
+    # 名额不挤占新 IP(stage2 名额只数新 IP)。窗口 (9h, 36h): 每轮测不完下轮继续, 不漏。
+    REVERIFY_HOURS = int(os.environ.get("REVERIFY_HOURS", "9"))
+    _demote_h = int(os.environ.get("DEMOTE_HOURS", "12"))
+    try:
+        _meta = json.loads(gist_file("good_pool_meta.json") or "{}")
+    except Exception:
+        _meta = {}
+    _now = int(time.time())
+    reverify = [p for p in good
+                if _meta.get(p)
+                and REVERIFY_HOURS * 3600 < _now - _meta.get(p) < (_demote_h + 24) * 3600]
+    if reverify:
+        print(f"[sift] 回炉复验 {len(reverify)} 个(超{REVERIFY_HOURS}h未复验): "
+              + ", ".join(reverify))
     cand = [p for p in all_px
             if p not in dead and p not in good
             and p.split(":")[0] not in ban_hosts
@@ -370,7 +387,7 @@ if __name__ == "__main__":
     seed = [p for p in seed if p not in good]
     if seed:
         print(f"[sift] 种子队列 {len(seed)} 个插队(外部投喂)")
-    cand = seed + cand    # 种子 > 常规候选
+    cand = seed + reverify + cand    # 种子 > 回炉复验 > 常规候选
     print(f"[sift] 排除 dead {len(dead & all_px)} / 已good {len(good & all_px)} / "
           f"IP级拉黑 {len(ban_hosts)} 段 + 已好 {len(good_hosts)} 段, 候选 {len(cand)}")
     if len(cand) < 40:   # (源扩容后基本不触发) 高频滚动下源没刷新就没有新货, 提前收工省配额
@@ -378,7 +395,7 @@ if __name__ == "__main__":
         open("sifted.txt", "w").close()
         sys.exit(0)
     # 优先队列(种子)不参与 shuffle/截断, 保证一定被测到
-    prio = seed
+    prio = seed + reverify
     rest = [p for p in cand if p not in set(prio)]
     random.shuffle(rest)
     # 流程反转(08-30): 源扩到 ~10 万后, ip-api 成了最贵一环(15 请求/分钟)。
