@@ -82,6 +82,7 @@ if __name__ == "__main__":
     if untested:
         print(f"[stage2] 提前收工, {len(untested)} 个未测不判死(下轮再测): " + ", ".join(untested[:5]))
     dead = [l.strip() for l in gist_file("dead_pool.txt").splitlines() if l.strip()]
+    reserve_set = set(l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip())
     # 09-10 明星机制(hall_of_fame 永赦)已按用户指示删除。
     # 替代语义: 已 good 的 IP 复验失败 → 降级 reserve(瞬断可复活), 不进 dead;
     # 新候选失败照旧进 dead。单次失败不再永久判死已验证 IP, 但也不再终身免检。
@@ -116,7 +117,8 @@ if __name__ == "__main__":
         meta.pop(p, None)
     # 复验失败降级不进 dead(新候选失败才进 dead)
     new_dead = [p for p in tested
-                if p not in passed and p not in dead and p not in set(demoted)]
+                if p not in passed and p not in dead and p not in set(demoted)
+                and p not in reserve_set]   # reserve 成员复验失败仍留 reserve(不判死)
     if fail_good:
         print("[stage2] 复验失败, 降级 reserve(不拉黑): " + ", ".join(fail_good))
     files = {}
