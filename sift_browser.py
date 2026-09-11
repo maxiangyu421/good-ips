@@ -51,19 +51,29 @@ def test_one(px):
 
 if __name__ == "__main__":
     cands = [l.strip() for l in open("sifted.txt") if l.strip()][:BUDGET]
+    good = [l.strip() for l in gist_file("good_pool.txt").splitlines() if l.strip()]
+    good_set = set(good)
+    # 09-12 fix: 新 IP 排前、已 good 的复验殿后; 「4 个名额」只数新 IP ——
+    # 修 09-10 诊断: 复验通过占满名额触发提前收工, 新 IP 根本轮不到试盾(good_pool 流干)。
+    new_first = [p for p in cands if p not in good_set]
+    reverify = [p for p in cands if p in good_set]
+    cands = new_first + reverify
+    if reverify:
+        print(f"[stage2] 复验 {len(reverify)} 个殿后, 新 IP {len(new_first)} 个优先", flush=True)
     print(f"[stage2] {len(cands)} 个候选", flush=True)
-    passed = []
+    passed, passed_new = [], 0
     for i, px in enumerate(cands):
         print(f"[try] {i+1}/{len(cands)} {px} …", flush=True)
         tok = test_one(px)
         if tok:
             print(f"[try] ✅ {px} token_len={len(tok)}", flush=True)
             passed.append(px)
+            if px not in good_set:
+                passed_new += 1
         else:
             print(f"[try] ❌ {px}", flush=True)
-        if len(passed) >= 4:   # 每轮最多收 4 个新优质, 够注册池滚动用了
-            print("[stage2] 已满 4 个, 提前收工"); break
-    good = [l.strip() for l in gist_file("good_pool.txt").splitlines() if l.strip()]
+        if passed_new >= 4:   # 每轮最多收 4 个「新」优质; 复验通过不占名额不触发收工
+            print("[stage2] 新优质已满 4 个, 提前收工"); break
     dead = [l.strip() for l in gist_file("dead_pool.txt").splitlines() if l.strip()]
     # 09-10 明星机制(hall_of_fame 永赦)已按用户指示删除。
     # 替代语义: 已 good 的 IP 复验失败 → 降级 reserve(瞬断可复活), 不进 dead;
@@ -106,6 +116,8 @@ if __name__ == "__main__":
     if new_good or demoted:
         files["good_pool.txt"] = {"content": "\n".join(new_good + fresh)}   # 无上限(09-07 用户要求), 面板翻页展示
         reserve = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
+        # 09-12 卫生: 已经回到 good 的 IP 不再留在 reserve(清掉跨池重复)
+        reserve = [p for p in reserve if p not in set(new_good + fresh)]
         new_reserve = [p for p in demoted if p not in reserve]
         reserve_all = (new_reserve + reserve)[:500]
         # 09-08 fix: Gist PATCH 里新建空文件(content="")会 422 且整个 patch 被静默丢弃,
