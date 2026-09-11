@@ -374,6 +374,13 @@ if __name__ == "__main__":
     reverify = [p for p in good
                 if _meta.get(p)
                 and REVERIFY_HOURS * 3600 < _now - _meta.get(p) < (_demote_h + 24) * 3600]
+    # reserve 成员也回炉: 它们都是曾经过盾的 IP, 12h 断崖期被无辜降级的可借此复活(09-12)
+    _res = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
+    _resv = [p for p in _res if p not in reverify and _meta.get(p)
+             and REVERIFY_HOURS * 3600 < _now - _meta.get(p) < (_demote_h + 24) * 3600]
+    if _resv:
+        print(f"[sift] reserve 复活复验 {len(_resv)} 个: " + ", ".join(_resv))
+    reverify += _resv
     if reverify:
         print(f"[sift] 回炉复验 {len(reverify)} 个(超{REVERIFY_HOURS}h未复验): "
               + ", ".join(reverify))
