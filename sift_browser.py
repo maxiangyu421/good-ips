@@ -61,8 +61,9 @@ if __name__ == "__main__":
     if reverify:
         print(f"[stage2] 复验 {len(reverify)} 个殿后, 新 IP {len(new_first)} 个优先", flush=True)
     print(f"[stage2] {len(cands)} 个候选", flush=True)
-    passed, passed_new = [], 0
+    passed, passed_new, tested_n = [], 0, 0
     for i, px in enumerate(cands):
+        tested_n = i + 1
         print(f"[try] {i+1}/{len(cands)} {px} …", flush=True)
         tok = test_one(px)
         if tok:
@@ -74,12 +75,18 @@ if __name__ == "__main__":
             print(f"[try] ❌ {px}", flush=True)
         if passed_new >= 4:   # 每轮最多收 4 个「新」优质; 复验通过不占名额不触发收工
             print("[stage2] 新优质已满 4 个, 提前收工"); break
+    # 09-12 fix: 提前收工后队尾根本没测过, 旧代码把未测的也写进 dead(新)/降级(复验),
+    # 等于收工即团灭队尾。现在只判「实测过」的; 未测的原地保留下轮再测。
+    tested = cands[:tested_n]
+    untested = cands[tested_n:]
+    if untested:
+        print(f"[stage2] 提前收工, {len(untested)} 个未测不判死(下轮再测): " + ", ".join(untested[:5]))
     dead = [l.strip() for l in gist_file("dead_pool.txt").splitlines() if l.strip()]
     # 09-10 明星机制(hall_of_fame 永赦)已按用户指示删除。
     # 替代语义: 已 good 的 IP 复验失败 → 降级 reserve(瞬断可复活), 不进 dead;
     # 新候选失败照旧进 dead。单次失败不再永久判死已验证 IP, 但也不再终身免检。
     new_good = [p for p in passed if p not in good]
-    fail_good = [p for p in cands if p not in passed and p in good]
+    fail_good = [p for p in tested if p not in passed and p in good]
     # ---- 优质池保鲜(09-07): 记录每个 IP 最近一次过盾时间, 超 12h 未复验就降级去 reserve 池 ----
     # 免费代理寿命小时级, 死 IP 占名额会稀释抽样还烧 35s 超时; 降级不硬删(瞬断 IP 会复活)。
     DEMOTE_HOURS = int(os.environ.get("DEMOTE_HOURS", "12"))
@@ -108,7 +115,7 @@ if __name__ == "__main__":
     for p in fail_good:
         meta.pop(p, None)
     # 复验失败降级不进 dead(新候选失败才进 dead)
-    new_dead = [p for p in cands
+    new_dead = [p for p in tested
                 if p not in passed and p not in dead and p not in set(demoted)]
     if fail_good:
         print("[stage2] 复验失败, 降级 reserve(不拉黑): " + ", ".join(fail_good))
@@ -130,7 +137,7 @@ if __name__ == "__main__":
     # 种子队列跑过就清掉本轮已测的, 避免下轮重复烧预算
     seedq = [l.strip() for l in gist_file("seed_queue.txt").splitlines() if l.strip()]
     if seedq:
-        left = [p for p in seedq if p not in cands]
+        left = [p for p in seedq if p not in tested]
         if len(left) != len(seedq):
             files["seed_queue.txt"] = {"content": ("\n".join(left) + "\n") if left else "\n"}
             print(f"[stage2] 种子队列消耗 {len(seedq)-len(left)} 个, 剩 {len(left)}")
