@@ -390,7 +390,7 @@ if __name__ == "__main__":
     cand = seed + reverify + cand    # 种子 > 回炉复验 > 常规候选
     print(f"[sift] 排除 dead {len(dead & all_px)} / 已good {len(good & all_px)} / "
           f"IP级拉黑 {len(ban_hosts)} 段 + 已好 {len(good_hosts)} 段, 候选 {len(cand)}")
-    if len(cand) < 40:   # (源扩容后基本不触发) 高频滚动下源没刷新就没有新货, 提前收工省配额
+    if len(cand) < 40 and not (seed or reverify):   # 源没新货可跳过, 但有回炉复验/种子时必须照跑(09-12), 否则复验通道失效
         print(f"[sift] 新候选不足 40, 本轮跳过(不烧 ip-api 配额/浏览器预算)")
         open("sifted.txt", "w").close()
         sys.exit(0)
