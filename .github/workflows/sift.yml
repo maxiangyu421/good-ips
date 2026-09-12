@@ -37,3 +37,11 @@ jobs:
         run: |
           if [ -s sifted.txt ]; then python sift_browser.py
           else echo "本轮无新候选, 跳过试盾"; fi
+      - name: Upload 失败截图(诊断用)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ucdbg-${{ github.run_id }}
+          path: uc_debug_*.png
+          if-no-files-found: ignore
+          retention-days: 3
