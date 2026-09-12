@@ -21,6 +21,10 @@ TRY_TIMEOUT = int(os.environ.get("TRY_TIMEOUT", "150"))
 # job 级时间护栏: 超过这个已用秒数就不再开新候选, 保证已过盾的结果能写回 Gist
 JOB_BUDGET = int(os.environ.get("STAGE2_BUDGET", str(70 * 60)))
 P0_DROP_KW = ("机房", "IDC", "数据中心", "广播")               # 唯一硬淘汰信号
+# 09-12 灰度实测(run 34689810547, 同一代理对照): pageLoadStrategy=normal 时
+# uc_open_with_reconnect() 卡死到被杀, eager 6.2s 打开页面并在 37s 内拿到 token。
+# 这就是「候选全灭」的真凶 —— 卡在打开页面, 不是点击 Turnstile。
+UC_PLS = os.environ.get("STAGE2_PLS", "eager")
 
 SUB_LOG = "/tmp/sub_proc.log"
 
@@ -115,7 +119,7 @@ def gist_patch(files):
 def ping0_profile(px):
     """uc_ping0.py 采集 ping0 出口画像(浏览器过挑战)。失败返回 {} 绝不抛。"""
     if os.path.exists("ping0_profile.json"): os.remove("ping0_profile.json")
-    env = dict(os.environ, SINGLE_PROXY=px)
+    env = dict(os.environ, SINGLE_PROXY=px, UC_PLS=UC_PLS)
     if not run_isolated(["xvfb-run", "-a", sys.executable, "uc_ping0.py"],
                         env, P0_TIMEOUT, tag="p0 " + px):
         print(f"[p0] {px} 采集超时({P0_TIMEOUT}s), 进程组已清理", flush=True)
@@ -143,7 +147,7 @@ def p0_sortkey(prof):
 def test_one(px, idx=0):
     for f in ("ts_token.txt", "ts_proxy.txt", "uc_debug.png"):
         if os.path.exists(f): os.remove(f)
-    env = dict(os.environ, SINGLE_PROXY=px)
+    env = dict(os.environ, SINGLE_PROXY=px, UC_PLS=UC_PLS)
     if not run_isolated(["xvfb-run", "-a", sys.executable, "uc_ts.py"],
                         env, TRY_TIMEOUT, tag="try " + px):
         print(f"[try] {px} 超时({TRY_TIMEOUT}s), 进程组已清理")
