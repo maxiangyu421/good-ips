@@ -14,21 +14,32 @@ GIST_ID = _CFG["GIST_ID"]
 BROWSER_N = int(os.environ.get("SIFT_COUNT", "15"))   # 交给阶段2浏览器实测的数量
 GIST_FILE = "dead_pool.txt"  # 只读; good_pool.txt 由阶段2写
 
-SOURCES = [
-    # 原 5 源(合计唯一 ~2500)
-    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all",
+# ---- 源分级(09-12, 实测驱动): 免费列表的"大"与"活"完全不成正比 ----
+# 实测各源真实存活率(每源抽 350 个唯一 IP, 沙盒):
+#   monosans 41.1% / hookzof 40.5% / proxifly 38.1% / casals-ar 17.4% / TheSpeedX 15.4%
+#   MuRongPIG  0.29%  <-- 71602 个唯一 IP, 占候选池 96%, 却几乎全是僵尸
+# 后果: 原来对全池均匀随机抽 6000 个, 96% 的探测预算扔在僵尸列表上 —
+#   实测 6004 个只活 154 -> 住宅白名单 2 / 普通 0;
+#   而小源全量 8046 个活 409 -> 住宅白名单 78 / 普通 53 (可用候选 2 -> 131)。
+# 现策略: 小源全量优先(排前面, 保证一定被 6000 预算吃到), 大源只做尾部填充。
+SMALL_SOURCES = [
+    # 小源: 体量小(~4k)但存活率高, 全量进采样队列
     "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
     "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-    # 08-30 新增(实测净增: 合计唯一 2493 -> 105704)
-    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt",          # ~100k, 净增 99647
-    "https://raw.githubusercontent.com/casals-ar/proxy-list/main/socks5",                 # 5419, 净增 2865
-    "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/refs/heads/main/socks5_proxies.txt",  # 2840, 净增 367
-    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt",  # 405, 净增 262
-    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/socks5.txt",      # 113, 净增 50
+    "https://raw.githubusercontent.com/casals-ar/proxy-list/main/socks5",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all",
+    "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/refs/heads/main/socks5_proxies.txt",
+    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt",
+    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/socks5.txt",
     "https://proxyspace.pro/socks5.txt",
 ]
+BIG_SOURCES = [
+    # 大源: 十万级僵尸列表, 只做尾部填充(候选不足时才轮到)
+    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt",
+]
+SOURCES = SMALL_SOURCES + BIG_SOURCES   # 兼容: 仍可按全量遍历
 
 def jreq(url, method="GET", data=None, hdrs=None, timeout=20):
     h = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
@@ -42,31 +53,39 @@ def jreq(url, method="GET", data=None, hdrs=None, timeout=20):
         try: return getattr(e, "code", -1) or -1, json.loads(e.read().decode())
         except Exception: return -1, {"error": str(e)[:120]}
 
+def _pull(url, raw):
+    """拉一个源并解析进 raw。返回本源新增条数。
+    09-12: 原代码先用 jreq(假定 JSON)拉一次再 urlopen 拉一次 —— 列表是纯文本,
+    第一次注定失败, 11 个源白拉 11 次(含 9 万行大文件)。现在只拉一次。"""
+    n0 = len(raw)
+    try:
+        with U.urlopen(U.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=25) as res:
+            txt = res.read().decode("utf-8", "ignore")
+    except Exception as e:
+        print(f"[src] {url.split('/')[2]} 失败: {str(e)[:60]}")
+        return 0
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"): continue
+        if "://" in line: line = line.split("://", 1)[1]
+        if "@" in line: line = line.split("@")[-1]      # user:pass@host:port
+        line = line.split()[0]                           # 行尾带国家/延迟注释
+        if ":" in line and line.replace(".", "").replace(":", "").isdigit():
+            raw.add(line)
+    return len(raw) - n0
+
 def fetch_lists():
-    raw = set()
-    for url in SOURCES:
-        try:
-            st, _ = jreq(url, timeout=25)
-            txt = _ if isinstance(_, str) else ""
-        except Exception:
-            st, txt = -1, ""
-        # jreq 假定 json; 列表是纯文本, 单独拉
-        try:
-            with U.urlopen(U.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=25) as res:
-                txt = res.read().decode("utf-8", "ignore")
-        except Exception as e:
-            print(f"[src] {url.split('/')[2]} 失败: {str(e)[:60]}"); continue
-        n0 = len(raw)
-        for line in txt.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"): continue
-            if "://" in line: line = line.split("://", 1)[1]
-            if "@" in line: line = line.split("@")[-1]      # user:pass@host:port
-            line = line.split()[0]                           # 行尾带国家/延迟注释
-            if ":" in line and line.replace(".", "").replace(":", "").isdigit():
-                raw.add(line)
-        print(f"[src] {url.split('/')[2]} +{len(raw)-n0}")
-    return raw
+    """返回 (small_raw, big_raw): 小源集合 / 大源集合, 各自已去重。
+    分级是为了让连通测预算优先吃高存活率的小源(见 SOURCES 上方说明)。"""
+    small, big = set(), set()
+    for url in SMALL_SOURCES:
+        n = _pull(url, small)
+        print(f"[src] {url.split('/')[2]} +{n}")
+    for url in BIG_SOURCES:
+        n = _pull(url, big)
+        print(f"[src] {url.split('/')[2]} +{n}  (大源/尾部填充)")
+    big -= small    # 小源已覆盖的从大源里摘掉(实测重叠 35.7%), 避免重复占位
+    return small, big
 
 def gist_file(name):
     st, d = jreq(f"https://api.github.com/gists/{GIST_ID}",
@@ -256,10 +275,23 @@ def socks5_ok(target, timeout=7):
         return False, 0
 
 if __name__ == "__main__":
-    all_px = fetch_lists()
-    print(f"[sift] 抓到 {len(all_px)} 个(去重后)")
+    small_raw, big_raw = fetch_lists()
+    all_px = small_raw | big_raw
+    print(f"[sift] 抓到 {len(all_px)} 个(去重后; 小源 {len(small_raw)} + 大源 {len(big_raw)})")
     dead = set(l.strip() for l in gist_file("dead_pool.txt").splitlines() if l.strip())
     good = set(l.strip() for l in gist_file("good_pool.txt").splitlines() if l.strip())
+    # ---- stage1 死 IP 缓存(09-12): dead_pool 只记 stage2 试盾失败, stage1 里连都连不上的
+    # 那 5800+ 个 IP 哪都不记 -> 下一轮从 10.6 万里重抽又抽到, 反复空烧握手。
+    # 现按 IP 记时间戳, S1_DEAD_TTL 内不再重复握手(默认 24h, 免费代理寿命本就小时级)。
+    S1_DEAD_TTL = int(os.environ.get("S1_DEAD_TTL", "86400"))
+    S1_DEAD_CAP = int(os.environ.get("S1_DEAD_CAP", "20000"))
+    try:
+        s1_dead = json.loads(gist_file("s1_dead.json") or "{}")
+    except Exception:
+        s1_dead = {}
+    _t_now = int(time.time())
+    s1_dead = {h: t for h, t in s1_dead.items() if _t_now - t < S1_DEAD_TTL}
+    s1_fresh = set()   # 本轮新确认连不通的
     # ---- IP 级去重(关键): 免费列表里同一 IP 会挂几十个端口, 同 IP 不同端口的
     # Turnstile/CF 信誉几乎完全一致 -> 逐端口重测纯属白烧浏览器预算。
     # 实测: dead_pool 176 条只有 117 个唯一 IP, 118.145.128.100 一个 IP 烧了 23 个端口。
@@ -295,10 +327,16 @@ if __name__ == "__main__":
     if reverify:
         print(f"[sift] 回炉复验 {len(reverify)} 个(超{REVERIFY_HOURS}h未复验): "
               + ", ".join(reverify))
-    cand = [p for p in all_px
-            if p not in dead and p not in good
-            and p.split(":")[0] not in ban_hosts
-            and p.split(":")[0] not in good_hosts]
+    def _ok(p):
+        return (p not in dead and p not in good
+                and p.split(":")[0] not in ban_hosts
+                and p.split(":")[0] not in good_hosts
+                and p.split(":")[0] not in s1_dead)
+    cand_small = [p for p in small_raw if _ok(p)]
+    cand_big = [p for p in big_raw if _ok(p)]
+    cand = cand_small + cand_big
+    print(f"[sift] stage1 死IP缓存命中 {len(all_px) - len(cand_small) - len(cand_big)} 条"
+          f"(TTL {S1_DEAD_TTL//3600}h, 现存 {len(s1_dead)} 条)")
     # ---- 种子队列: 外部投喂的代理(如别人分享的住宅列表)插队优先试盾 ----
     # 用法: 往 Gist 的 seed_queue.txt 写 host:port 每行一个; 试过一轮即清空。
     seed = [l.strip() for l in gist_file("seed_queue.txt").splitlines() if l.strip()]
@@ -312,18 +350,42 @@ if __name__ == "__main__":
         print(f"[sift] 新候选不足 40, 本轮跳过(不烧 ip-api 配额/浏览器预算)")
         open("sifted.txt", "w").close()
         sys.exit(0)
-    # 优先队列(种子)不参与 shuffle/截断, 保证一定被测到
+    # 优先队列(种子+回炉复验)不参与 shuffle/截断, 保证一定被测到
     prio = seed + reverify
-    rest = [p for p in cand if p not in set(prio)]
-    random.shuffle(rest)
-    # 流程反转(08-30): 源扩到 ~10 万后, ip-api 成了最贵一环(15 请求/分钟)。
-    # 先用免费无限的 SOCKS5 握手把 6000 个候选压到几十个活的, 再花 ip-api 配额查质量。
-    cand = prio + rest[:6000]
+    # ---- 采样顺序(09-12 关键改造) ----
+    # 小源(高存活率)全量排前, 大源(僵尸列表)shuffle 后只做尾部填充:
+    # 同样 6000 次握手预算, 可用候选从 ~2 个变成 ~130 个。
+    prio_set0 = set(prio)
+    small_rest = [p for p in cand_small if p not in prio_set0]
+    big_rest = [p for p in cand_big if p not in prio_set0]
+    random.shuffle(small_rest)
+    random.shuffle(big_rest)
+    # ---- 测前按 IP 去重(09-12): 原代码先测 6000 个再按 host 去重(白烧 ~30% 预算);
+    # 列表里同 IP 多端口极普遍(全池 106362 行/74084 IP = 143%, 小源 208%)。
+    def _dedup_ip(lst):
+        seen, out = set(), []
+        for p in lst:
+            h = p.split(":")[0]
+            if h in seen: continue
+            seen.add(h); out.append(p)
+        return out
+    queue = _dedup_ip(prio) + _dedup_ip(small_rest) + _dedup_ip(big_rest)
+    print(f"[sift] 测前队列: 优先 {len(prio)} + 小源 {len(small_rest)} + 大源 {len(big_rest)}"
+          f" (已按 IP 去重)")
+    # 流程反转(08-30): ip-api 是最贵一环(15 请求/分钟)。
+    # 先用免费无限的 SOCKS5 握手把候选压到几十个活的, 再花 ip-api 配额查质量。
+    cand = queue[:6000]
     t0 = time.time()
     with ThreadPoolExecutor(128) as ex:
         results = dict(zip(cand, ex.map(socks5_ok, cand)))
     alive_raw = sorted([(ms, p) for p, (ok, ms) in results.items() if ok])
-    print(f"[sift] 连通测 {len(cand)} 个 -> 活 {len(alive_raw)}, 耗时 {int(time.time()-t0)}s")
+    n_small_alive = sum(1 for _, p in alive_raw if p in set(cand_small))
+    print(f"[sift] 连通测 {len(cand)} 个 -> 活 {len(alive_raw)}"
+          f"(其中小源 {n_small_alive}), 耗时 {int(time.time()-t0)}s")
+    # 记录本轮连不通的(供 s1_dead 缓存, 大源样本为主, 省下轮预算)
+    for p in cand:
+        if not results[p][0]:
+            s1_fresh.add(p.split(":")[0])
     # 同 IP 只留最快端口, 再送去查质量(省配额)
     seen0, dedup = set(), []
     for ms, p in alive_raw:
@@ -348,6 +410,21 @@ if __name__ == "__main__":
     print(f"[sift] 送盾队列 {len(picked)} 个(画像采集/风控排序在 stage2 浏览器内做)")
     if ipis_dc:
         print("[sift] 已剔除机房: " + ", ".join(ipis_dc[:10]))
+    # ---- stage1 死 IP 缓存写回(09-12): 只进 dead 的不写(good 里出现过的不误伤) ----
+    newly = [h for h in s1_fresh if h not in good_hosts]
+    for h in newly:
+        s1_dead[h] = _t_now
+    if len(s1_dead) > S1_DEAD_CAP:
+        s1_dead = dict(sorted(s1_dead.items(), key=lambda kv: -kv[1])[:S1_DEAD_CAP])
+    if newly:
+        try:
+            st, _ = jreq(f"https://api.github.com/gists/{GIST_ID}", "PATCH",
+                         {"files": {"s1_dead.json": {
+                             "content": json.dumps(s1_dead)}}},
+                         {"Authorization": "token " + GIST_TOKEN})
+            print(f"[sift] s1_dead.json 写回 +{len(newly)} (共 {len(s1_dead)}, status {st})")
+        except Exception as e:
+            print(f"[sift] s1_dead 写回失败(不影响主流程): {str(e)[:80]}")
     with open("sifted.txt", "w") as f:
         f.write("\n".join(picked))
     for p in alive[:20]:
