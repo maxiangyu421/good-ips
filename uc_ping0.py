@@ -37,8 +37,13 @@ def main():
     out = {}
     try:
         from seleniumbase import SB
+        # 09-12: 与 uc_ts.py 同因同修 —— normal 等 load 事件会卡死(灰度实测),
+        # eager 只等 DOMContentLoaded。ping0.cc 也是 CF 站, 子资源拖死同样中招。
+        pls = os.environ.get("UC_PLS", "").strip() or "eager"
+        kw = {"page_load_strategy": pls} if pls in ("normal", "eager", "none") else {}
         with SB(uc=True, locale="en", proxy="socks5://" + px,
-                chromium_arg="--ignore-certificate-errors") as sb:
+                chromium_arg="--ignore-certificate-errors", **kw) as sb:
+            print("[p0] page_load_strategy=%s" % pls, flush=True)
             sb.uc_open_with_reconnect(URL, reconnect_time=6)
             prof = {}
             for i in range(9):   # ~54s: 挑战自动过 → reload → 服务端直出字段出现
