@@ -188,9 +188,24 @@ if __name__ == "__main__":
         if native: extra += f" {native}"
         print(f"[p0] {'⚠️' if red else '▫️'} {px} {tag}{extra} 排序{sk}", flush=True)
         keyed.append((sk, px))
-    # 超出 P0_PROFILE_MAX 的不采集, 按原顺序排尾
+    # ===== 09-12 三修: 画像采完必须重新分离「新 IP / 复验 IP」(原队列塌方根因) =====
+    # 现象: good_pool 反复卡在 4~5。r507→r511 连续 5 轮 0 产出, 好不容易 r512 收了
+    # 72.195.101.99、r513 收了 66.42.224.229, 到 r514 池子又只剩 4 个。
+    # 根因(日志实锤): 上面这段画像排序把「新 IP + 复验 IP」混在一起重新赋值给 new_first:
+    #     new_first = [px for _, px in keyed] + new_first[P0_PROFILE_MAX:]
+    # 而 keyed 同时含复验 IP(它们评分低=风控 82~90% 排最前), 于是复验 IP 被塞进 new_first 队首。
+    # 后果一(名额错乱): 后面 `if px not in good_set` 用 good_set 静态判定, 复验 IP「通过」
+    #   本该不占名额, 现在因为「新 IP 4 个名额」被队首的复验 IP 提前凑满而误触发提前收工:
+    #   r505 回炉 3 个复验 IP 跑到新 IP 位置, 1 个通过就凑满 4 个 → 收工 → 3 个候选次也没测。
+    # 后果二(判死错乱): 更致命 —— 同一批复验 IP 同时出现在 new_first 和 reverify 两处,
+    #   循环里同一个 IP 被测试两次; 第一次失败走 `tested` 判死逻辑, 第二次(尾部那份)却因为
+    #   提前收工躺在 untested 里逃过判死, 状态机自相矛盾。
+    # 修法: 记录画像得到的新排序, 但「复验」身份由 reverify 集合唯一决定, 两队列物理隔离。
     keyed.sort(key=lambda x: x[0])
-    new_first = [px for _, px in keyed] + new_first[P0_PROFILE_MAX:]
+    new_sorted = [px for _, px in keyed] + new_first[P0_PROFILE_MAX:]
+    new_first = [px for px in new_sorted if px not in good_set]
+    reverify = [px for px in new_sorted if px in good_set] + \
+               [px for px in reverify if px not in good_set]
     cands = new_first + reverify
     if dropped_p0:
         print(f"[p0] ping0 机房/广播判死 {len(dropped_p0)} 个: " + ", ".join(dropped_p0), flush=True)
@@ -239,8 +254,12 @@ if __name__ == "__main__":
                     print(f"[gist] 增量落盘失败(不影响主流程): {str(e)[:90]}", flush=True)
         else:
             print(f"[try] ❌ {px}", flush=True)
-        if passed_new >= 4:   # 每轮最多收 4 个「新」优质; 复验通过不占名额不触发收工
-            print("[stage2] 新优质已满 4 个, 提前收工"); break
+        if passed_new >= 4 and i + 1 >= len(new_first):
+            # 每轮最多收 4 个「新」优质(护住 ipapi 配额节奏); 复验通过不占名额。
+            # 09-12: 原来收满 4 个立刻 break —— 队列尾巴(常是几十个复验 IP)整批不测,
+            # 躺进 untested「下轮再测」, 而下轮队列又是新的一批, 复验 IP 永远轮不到。
+            # 现在只在「新 IP 段已跑完」时收工; 剩下的复验段继续跑掉。
+            print("[stage2] 新优质已满 4 个, 新候选段跑完, 继续跑复验段(不空烧下轮)"); break
     # 09-12 fix: 提前收工后队尾根本没测过, 旧代码把未测的也写进 dead(新)/降级(复验),
     # 等于收工即团灭队尾。现在只判「实测过」的; 未测的原地保留下轮再测。
     tested = cands[:tested_n]
@@ -254,6 +273,12 @@ if __name__ == "__main__":
     # 新候选失败照旧进 dead。单次失败不再永久判死已验证 IP, 但也不再终身免检。
     new_good = [p for p in passed if p not in good]
     fail_good = [p for p in tested if p not in passed and p in good]
+    # ---- 09-12 四修: reserve 复验通过 = 复活回 good(此前只有「从 good 跌到 reserve」单向,
+    # 没有「从 reserve 爬回 good」的通道 —— 结果 reserve 越攒越多(48 个), good 却永远补不回来,
+    # 而 reserve 成员每轮只挑 2 个回炉(还要 meta 超 9h), 48 个一轮最多捞 2 个, 排队几个月。
+    restore = [p for p in passed if p in reserve_set and p not in good]
+    if restore:
+        print(f"[stage2] reserve 复验通过, 复活回 good_pool: {', '.join(restore)}")
     # ---- 优质池保鲜(09-07): 记录每个 IP 最近一次过盾时间, 超 12h 未复验就降级去 reserve 池 ----
     # 免费代理寿命小时级, 死 IP 占名额会稀释抽样还烧 35s 超时; 降级不硬删(瞬断 IP 会复活)。
     DEMOTE_HOURS = int(os.environ.get("DEMOTE_HOURS", "12"))
@@ -289,15 +314,17 @@ if __name__ == "__main__":
     if fail_good:
         print("[stage2] 复验失败, 降级 reserve(不拉黑): " + ", ".join(fail_good))
     files = {}
-    if new_good or demoted:
+    if new_good or demoted or restore:
         # 09-12 fix: 空 content PATCH「已存在」的文件 = GitHub 直接删除该文件(实测 200),
         # 整个 good_pool 会消失; 而 content 为空 PATCH「不存在」的文件 = 422 整个 patch 全丢。
         # 触发场景: 一轮内所有 good 全超 DEMOTE_HOURS 降级且无新过盾 -> new_good+fresh 为空。
         # 兜底写 "\n" 保留文件(panel._patch_gist 早有同样兜底, 这里原先漏了)。
-        files["good_pool.txt"] = {"content": ("\n".join(new_good + fresh)) or "\n"}   # 无上限(09-07 用户要求), 面板翻页展示
+        for p in restore:            # 09-12: 复活的 IP 也要刷新 meta 计时, 否则立刻又被降级
+            meta[p] = now_ts
+        files["good_pool.txt"] = {"content": ("\n".join(new_good + restore + fresh)) or "\n"}   # 无上限(09-07 用户要求), 面板翻页展示
         reserve = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
         # 09-12 卫生: 已经回到 good 的 IP 不再留在 reserve(清掉跨池重复)
-        reserve = [p for p in reserve if p not in set(new_good + fresh)]
+        reserve = [p for p in reserve if p not in set(new_good + fresh + restore)]
         new_reserve = [p for p in demoted if p not in reserve]
         reserve_all = (new_reserve + reserve)[:500]
         # 09-08 fix: Gist PATCH 里新建空文件(content="")会 422 且整个 patch 被静默丢弃,
