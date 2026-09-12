@@ -1,0 +1,38 @@
+name: probe
+# 09-12 新增: 灰度探针。对指定代理 × 指定 pageLoadStrategy 跑 uc_ts.py,
+# 只打印结果不写 Gist(uc_probe.py 不碰任何池子文件), 用于定位「打开注册页卡死」。
+on:
+  workflow_dispatch:
+    inputs:
+      proxies:
+        description: "逗号分隔 host:port"
+        default: "72.195.101.99:4145"
+      arms:
+        description: "策略:超时秒, 逗号分隔(default=SB 默认 normal)"
+        default: "default:90,eager:150"
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CONFIG_KEY: ${{ secrets.CONFIG_KEY }}
+      PROBE_LIST: ${{ inputs.proxies }}
+      PROBE_ARMS: ${{ inputs.arms }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install seleniumbase pyautogui
+      - name: 解密配置(不入库不打印)
+        run: python3 cfg_open.py --write
+      - name: 灰度探针
+        run: python3 uc_probe.py
+      - name: Upload 失败截图(诊断用)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ github.run_id }}
+          path: probe_*.png
+          if-no-files-found: ignore
+          retention-days: 3
