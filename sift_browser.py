@@ -22,27 +22,70 @@ TRY_TIMEOUT = int(os.environ.get("TRY_TIMEOUT", "150"))
 JOB_BUDGET = int(os.environ.get("STAGE2_BUDGET", str(70 * 60)))
 P0_DROP_KW = ("机房", "IDC", "数据中心", "广播")               # 唯一硬淘汰信号
 
-def run_isolated(cmd, env, timeout):
-    """跑子进程, 超时杀整个进程组。
+SUB_LOG = "/tmp/sub_proc.log"
+
+def _tail_text(path, keep=8000):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - keep))
+            return f.read().decode(errors="replace")
+    except Exception:
+        return ""
+
+def run_isolated(cmd, env, timeout, tag=""):
+    """跑子进程, 超时杀整个进程组; 子进程输出落盘, 失败时回显尾部。
     09-12: 原来用 subprocess.run(timeout=N) —— 它只杀直接子进程, 而这里是
     xvfb-run(shell 脚本) -> python -> chromedriver -> chrome。
     超时杀掉 xvfb-run 后, 底下的 chrome 全部变孤儿继续吃内存(每轮最多 40 次调用,
     失败路径几乎都走超时), runner 上攒够就是 OOM/拖慢后续轮次。
-    用 start_new_session 让子进程自成进程组, 超时对整组 SIGKILL。"""
-    p = subprocess.Popen(cmd, env=env, start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        p.wait(timeout=timeout)
-        return True
-    except subprocess.TimeoutExpired:
+    用 start_new_session 让子进程自成进程组, 超时对整组 SIGKILL。
+    09-12 二次修复: 子进程 stdout/stderr 原来直接丢 DEVNULL —— uc_ts.py 打的
+    「初始 token_len / click 异常 / 代理队列」全被吞掉, Actions 日志里只剩
+    「❌/超时」, 排查只能靠猜(池子连续多轮 0 产出就是这个盲区)。现在落盘并回显。"""
+    try: os.remove(SUB_LOG)
+    except Exception: pass
+    with open(SUB_LOG, "wb") as fo:
+        p = subprocess.Popen(cmd, env=env, start_new_session=True,
+                             stdout=fo, stderr=subprocess.STDOUT)
         try:
-            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-        except Exception:
-            try: p.kill()
+            p.wait(timeout=timeout)
+            ok = True
+        except subprocess.TimeoutExpired:
+            ok = False
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except Exception:
+                try: p.kill()
+                except Exception: pass
+            try: p.wait(timeout=10)
             except Exception: pass
-        try: p.wait(timeout=10)
-        except Exception: pass
-        return False
+    pre = "[sub%s] " % ((" " + tag) if tag else "")
+    tail = [l.rstrip() for l in _tail_text(SUB_LOG).splitlines() if l.strip()][-10:]
+    for line in tail:
+        print(pre + line[:220], flush=True)
+    if not tail:
+        print(pre + "(子进程无任何输出)", flush=True)
+    return ok
+
+def print_env_versions():
+    """跑之前先把 runner 的 chrome / seleniumbase 版本打进日志 ——
+    ubuntu-latest 的 Chrome 是滚动更新的, chromedriver 版本一旦对不上,
+    所有候选都会瞬间失败, 而日志里只会看到「❌」看不出原因。"""
+    import importlib.metadata as md
+    cmds = [["google-chrome", "--version"], ["chromedriver", "--version"]]
+    for c in cmds:
+        try:
+            r = subprocess.run(c, capture_output=True, text=True, timeout=90)
+            print("[env] %s -> %s" % (c[0], (r.stdout or r.stderr).strip()[:120]), flush=True)
+        except Exception as e:
+            print("[env] %s 查询失败: %s" % (c[0], str(e)[:80]), flush=True)
+    for pkg in ("seleniumbase", "selenium"):
+        try:
+            print("[env] %s==%s" % (pkg, md.version(pkg)), flush=True)
+        except Exception as e:
+            print("[env] %s 版本未知: %s" % (pkg, str(e)[:60]), flush=True)
 
 def jreq(url, method="GET", data=None, hdrs=None, timeout=20):
     import json, urllib.request as U
@@ -74,7 +117,7 @@ def ping0_profile(px):
     if os.path.exists("ping0_profile.json"): os.remove("ping0_profile.json")
     env = dict(os.environ, SINGLE_PROXY=px)
     if not run_isolated(["xvfb-run", "-a", sys.executable, "uc_ping0.py"],
-                        env, P0_TIMEOUT):
+                        env, P0_TIMEOUT, tag="p0 " + px):
         print(f"[p0] {px} 采集超时({P0_TIMEOUT}s), 进程组已清理", flush=True)
     try:
         return json.load(open("ping0_profile.json"))
@@ -97,19 +140,25 @@ def p0_sortkey(prof):
     if "代理" in labels: sk += 50
     return sk
 
-def test_one(px):
-    for f in ("ts_token.txt", "ts_proxy.txt"):
+def test_one(px, idx=0):
+    for f in ("ts_token.txt", "ts_proxy.txt", "uc_debug.png"):
         if os.path.exists(f): os.remove(f)
     env = dict(os.environ, SINGLE_PROXY=px)
     if not run_isolated(["xvfb-run", "-a", sys.executable, "uc_ts.py"],
-                        env, TRY_TIMEOUT):
+                        env, TRY_TIMEOUT, tag="try " + px):
         print(f"[try] {px} 超时({TRY_TIMEOUT}s), 进程组已清理")
     tok = ""
     if os.path.exists("ts_token.txt"):
         tok = open("ts_token.txt").read().strip()
+    if not tok and os.path.exists("uc_debug.png"):
+        # 失败截图留档: uc_ts 失败时会截一张, 但下一个候选会覆盖它 ->
+        # 按序号改名, workflow 收尾统一上传成 artifact 供人工看「卡在哪一步」。
+        try: os.rename("uc_debug.png", f"uc_debug_{idx:02d}.png")
+        except Exception: pass
     return tok
 
 if __name__ == "__main__":
+    print_env_versions()
     cands = [l.strip() for l in open("sifted.txt") if l.strip()][:BUDGET]
     good = [l.strip() for l in gist_file("good_pool.txt").splitlines() if l.strip()]
     good_set = set(good)
@@ -154,7 +203,7 @@ if __name__ == "__main__":
             break
         tested_n = i + 1
         print(f"[try] {i+1}/{len(cands)} {px} …", flush=True)
-        tok = test_one(px)
+        tok = test_one(px, i + 1)
         if tok:
             print(f"[try] ✅ {px} token_len={len(tok)}", flush=True)
             passed.append(px)
