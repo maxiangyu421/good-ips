@@ -12,8 +12,14 @@ from cfg_open import load as _cfg
 _CFG = _cfg()
 GIST_TOKEN = os.environ["GIST_TOKEN"]; GIST_ID = _CFG["GIST_ID"]
 BUDGET = int(os.environ.get("SIFT_COUNT", "10"))
-P0_PROFILE_MAX = int(os.environ.get("P0_PROFILE_MAX", "15"))   # 画像采集上限(护 70min job 预算)
-P0_TIMEOUT = int(os.environ.get("P0_TIMEOUT", "50"))           # 单个画像采集预算(秒)
+P0_PROFILE_MAX = int(os.environ.get("P0_PROFILE_MAX", "15"))   # 画像采集上限(护 job 预算)
+# 09-12: 50 -> 80s。实测新候选是慢速住宅代理(冷启动 Chrome 过隧道 40~60s), 50s 时
+# 7/9 全部超时 -> 画像全空 -> 排序全变 600, 风控排序形同失效。
+P0_TIMEOUT = int(os.environ.get("P0_TIMEOUT", "80"))           # 单个画像采集预算(秒)
+# 09-12: 试盾 110 -> 150s。同理, 慢代理 110s 内常拿不到 token(4/9 超时)。
+TRY_TIMEOUT = int(os.environ.get("TRY_TIMEOUT", "150"))
+# job 级时间护栏: 超过这个已用秒数就不再开新候选, 保证已过盾的结果能写回 Gist
+JOB_BUDGET = int(os.environ.get("STAGE2_BUDGET", str(70 * 60)))
 P0_DROP_KW = ("机房", "IDC", "数据中心", "广播")               # 唯一硬淘汰信号
 
 def run_isolated(cmd, env, timeout):
@@ -96,8 +102,8 @@ def test_one(px):
         if os.path.exists(f): os.remove(f)
     env = dict(os.environ, SINGLE_PROXY=px)
     if not run_isolated(["xvfb-run", "-a", sys.executable, "uc_ts.py"],
-                        env, 110):
-        print(f"[try] {px} 超时(110s), 进程组已清理")
+                        env, TRY_TIMEOUT):
+        print(f"[try] {px} 超时({TRY_TIMEOUT}s), 进程组已清理")
     tok = ""
     if os.path.exists("ts_token.txt"):
         tok = open("ts_token.txt").read().strip()
@@ -139,7 +145,13 @@ if __name__ == "__main__":
         print(f"[stage2] 复验 {len(reverify)} 个殿后, 新 IP {len(new_first)} 个优先(已按风控排序)", flush=True)
     print(f"[stage2] {len(cands)} 个候选", flush=True)
     passed, passed_new, tested_n = [], 0, 0
+    t_stage2 = time.time()
     for i, px in enumerate(cands):
+        used = time.time() - t_stage2
+        if used > JOB_BUDGET:
+            print(f"[stage2] 已用 {used/60:.1f}min 触达时间护栏({JOB_BUDGET/60:.0f}min), "
+                  f"停手写回(剩 {len(cands)-i} 个下轮再测)", flush=True)
+            break
         tested_n = i + 1
         print(f"[try] {i+1}/{len(cands)} {px} …", flush=True)
         tok = test_one(px)
