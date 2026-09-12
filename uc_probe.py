@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""灰度探针(09-12): 对给定代理 × 给定 page_load_strategy 跑 uc_ts.py, 只打印结果。
+"""灰度探针(09-12): 对给定代理 × 给定策略跑 uc_ts.py, 只打印结果。
 刻意不写 Gist、不动任何池子 —— 纯诊断, 跑多少次都不会污染 good_pool/dead_pool。
 
 用法(Actions workflow probe.yml 里):
-  PROBE_LIST="72.195.101.99:4145" PROBE_ARMS="default:90,eager:150" python3 uc_probe.py
+  PROBE_LIST="72.195.101.99:4145" PROBE_ARMS="eager:150,legacy:300" python3 uc_probe.py
   - PROBE_LIST: 逗号分隔 host:port
-  - PROBE_ARMS: 逗号分隔 策略:超时秒; 策略 default = 不设 UC_PLS(SB 默认 normal)
+  - PROBE_ARMS: 逗号分隔 策略:超时秒; 策略 default = 不设 UC_PLS(SB 默认 normal),
+    legacy = UC_TS_LEGACY=1(回跑 uc_ts v1 逻辑) + eager, 其余名字 = UC_PLS 值(v2 流程)。
 """
 import os, signal, subprocess, sys, time
 
@@ -53,20 +54,27 @@ def main():
         for arm, tmo in arms:
             for f in ("ts_token.txt", "ts_proxy.txt", "uc_debug.png"):
                 if os.path.exists(f): os.remove(f)
+            env = dict(os.environ, SINGLE_PROXY=px)
             if arm == "default":
-                env = dict(os.environ, SINGLE_PROXY=px); env.pop("UC_PLS", None)
+                env.pop("UC_PLS", None)
+            elif arm == "legacy":
+                env["UC_PLS"] = "eager"; env["UC_TS_LEGACY"] = "1"
             else:
-                env = dict(os.environ, SINGLE_PROXY=px, UC_PLS=arm)
+                env["UC_PLS"] = arm
             print("\n===== %s × %s (超时 %ds) =====" % (px, arm, tmo), flush=True)
-            ok, used, out = run(["xvfb-run", "-a", sys.executable, "uc_ts.py"], env, tmo)
+            ok, used, out = run(["xvfb-run", "-a", "-s", "-screen 0 1280x1024x24",
+                                 sys.executable, "uc_ts.py"], env, tmo)
             for line in [l.rstrip() for l in out.splitlines() if l.strip()][-14:]:
                 print("[sub] " + line[:220], flush=True)
             tok = ""
             if os.path.exists("ts_token.txt"):
                 tok = open("ts_token.txt").read().strip()
-            if not tok and os.path.exists("uc_debug.png"):
-                try: os.rename("uc_debug.png", "probe_%s_%s.png" % (px.replace(":", "_"), arm))
-                except Exception: pass
+            if not tok:
+                import glob
+                for f in sorted(glob.glob("uc_debug*.png")):
+                    suf = f[len("uc_debug"):].lstrip("_") or "fail"
+                    try: os.rename(f, "probe_%s_%s_%s" % (px.replace(":", "_"), arm, suf))
+                    except Exception: pass
             st = ("✅ token_len=%d" % len(tok)) if tok else ("⏱ 超时" if not ok else "❌ 无 token")
             rows.append((px, arm, st, used))
             print("[probe] 结果 %s × %s -> %s (%.0fs)" % (px, arm, st, used), flush=True)

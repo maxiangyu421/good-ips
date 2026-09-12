@@ -13,7 +13,7 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 55   # 09-12: 30->55, 容纳 v2/legacy 双臂 × 4 代理最坏 40min
     env:
       CONFIG_KEY: ${{ secrets.CONFIG_KEY }}
       PROBE_LIST: ${{ inputs.proxies }}

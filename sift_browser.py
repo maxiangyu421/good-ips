@@ -22,6 +22,9 @@ TRY_TIMEOUT = int(os.environ.get("TRY_TIMEOUT", "300"))
 # job 级时间护栏: 超过这个已用秒数就不再开新候选, 保证已过盾的结果能写回 Gist
 JOB_BUDGET = int(os.environ.get("STAGE2_BUDGET", str(70 * 60)))
 P0_DROP_KW = ("机房", "IDC", "数据中心", "广播")               # 唯一硬淘汰信号
+# xvfb 默认屏幕只有 640x480x24 —— Chrome 窗口被压在 640x480 里, Turnstile 控件
+# 靠视口下沿时可能被裁掉, 截图诊断也看不清。显式给大屏(09-12 交互式挑战迭代)。
+XVFB_ARGS = os.environ.get("XVFB_ARGS", "-screen 0 1280x1024x24")
 # 09-12 灰度实测(run 34689810547, 同一代理对照): pageLoadStrategy=normal 时
 # uc_open_with_reconnect() 卡死到被杀, eager 6.2s 打开页面并在 37s 内拿到 token。
 # 这就是「候选全灭」的真凶 —— 卡在打开页面, 不是点击 Turnstile。
@@ -121,7 +124,7 @@ def ping0_profile(px):
     """uc_ping0.py 采集 ping0 出口画像(浏览器过挑战)。失败返回 {} 绝不抛。"""
     if os.path.exists("ping0_profile.json"): os.remove("ping0_profile.json")
     env = dict(os.environ, SINGLE_PROXY=px, UC_PLS=UC_PLS)
-    if not run_isolated(["xvfb-run", "-a", sys.executable, "uc_ping0.py"],
+    if not run_isolated(["xvfb-run", "-a", "-s", XVFB_ARGS, sys.executable, "uc_ping0.py"],
                         env, P0_TIMEOUT, tag="p0 " + px):
         print(f"[p0] {px} 采集超时({P0_TIMEOUT}s), 进程组已清理", flush=True)
     try:
@@ -149,17 +152,21 @@ def test_one(px, idx=0):
     for f in ("ts_token.txt", "ts_proxy.txt", "uc_debug.png"):
         if os.path.exists(f): os.remove(f)
     env = dict(os.environ, SINGLE_PROXY=px, UC_PLS=UC_PLS)
-    if not run_isolated(["xvfb-run", "-a", sys.executable, "uc_ts.py"],
+    if not run_isolated(["xvfb-run", "-a", "-s", XVFB_ARGS, sys.executable, "uc_ts.py"],
                         env, TRY_TIMEOUT, tag="try " + px):
         print(f"[try] {px} 超时({TRY_TIMEOUT}s), 进程组已清理")
     tok = ""
     if os.path.exists("ts_token.txt"):
         tok = open("ts_token.txt").read().strip()
-    if not tok and os.path.exists("uc_debug.png"):
-        # 失败截图留档: uc_ts 失败时会截一张, 但下一个候选会覆盖它 ->
-        # 按序号改名, workflow 收尾统一上传成 artifact 供人工看「卡在哪一步」。
-        try: os.rename("uc_debug.png", f"uc_debug_{idx:02d}.png")
-        except Exception: pass
+    if not tok:
+        # 失败截图留档: uc_ts v2 每轮失败都截一张(uc_debug_rN.png), 最终失败再截
+        # uc_debug.png —— 但下一个候选会覆盖它们, 按序号改名保留, workflow 收尾
+        # 统一上传成 artifact 供人工看「卡在哪一步」。
+        import glob
+        for f in sorted(glob.glob("uc_debug*.png")):
+            suf = f[len("uc_debug"):].lstrip("_") or "fail"
+            try: os.rename(f, f"uc_debug_{idx:02d}_{suf}")
+            except Exception: pass
     return tok
 
 if __name__ == "__main__":
