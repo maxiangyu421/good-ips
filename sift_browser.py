@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """阶段2: 对 sifted.txt 逐个用 uc_ts.py(SINGLE_PROXY) 真·试 Turnstile。
 出 token → 写 Gist good_pool.txt(置顶池, 注册流程自动优先用); 失败 → 累积 dead_pool.txt。
-每个代理一个 xvfb-run 子进程, 干净隔离; 单个预算 110s。"""
+每个代理一个 xvfb-run 子进程, 干净隔离; 单个预算 110s。
+09-12 新增: 试盾前先 uc_ping0.py 采 ping0 出口画像(stage1 无头隧道已死, 迁来这里):
+  - 标「IDC机房/广播」的新 IP → 跳过试盾直接判死(省 110s 浏览器预算)
+  - 其余按「风控值升序 + 代理红标降权」排序送盾(干净排前)
+  - 复验 IP 不做 ping0 判死(不加新 kill 路径, 防重演 09-12 断崖); 画像仅参考"""
 import os, sys, subprocess, json, time
 
 from cfg_open import load as _cfg
 _CFG = _cfg()
 GIST_TOKEN = os.environ["GIST_TOKEN"]; GIST_ID = _CFG["GIST_ID"]
 BUDGET = int(os.environ.get("SIFT_COUNT", "10"))
+P0_PROFILE_MAX = int(os.environ.get("P0_PROFILE_MAX", "15"))   # 画像采集上限(护 70min job 预算)
+P0_TIMEOUT = int(os.environ.get("P0_TIMEOUT", "50"))           # 单个画像采集预算(秒)
+P0_DROP_KW = ("机房", "IDC", "数据中心", "广播")               # 唯一硬淘汰信号
 
 def jreq(url, method="GET", data=None, hdrs=None, timeout=20):
     import json, urllib.request as U
@@ -34,6 +41,37 @@ def gist_patch(files):
     if st >= 300:
         print(f"[gist] patch 失败详情: {json.dumps(d)[:300]}")
 
+def ping0_profile(px):
+    """uc_ping0.py 采集 ping0 出口画像(浏览器过挑战)。失败返回 {} 绝不抛。"""
+    if os.path.exists("ping0_profile.json"): os.remove("ping0_profile.json")
+    env = dict(os.environ, SINGLE_PROXY=px)
+    try:
+        subprocess.run(["xvfb-run", "-a", sys.executable, "uc_ping0.py"],
+                       env=env, timeout=P0_TIMEOUT, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        print(f"[p0] {px} 采集超时({P0_TIMEOUT}s)", flush=True)
+    try:
+        return json.load(open("ping0_profile.json"))
+    except Exception:
+        return {}
+
+def p0_is_idc(prof):
+    """画像里带机房/广播类标签 → 硬淘汰(与过盾强负相关)。"""
+    if not prof: return False
+    text = " ".join(prof.get("labels") or []) + " " + str(prof.get("iptype") or "")
+    return any(k.lower() in text.lower() for k in P0_DROP_KW)
+
+def p0_sortkey(prof):
+    """排序键: 风控值升序, 代理红标 +50 降权, 无画像 600 排尾。
+    风控不淘汰(池内过盾 IP 风控普遍 80%+, 相关性弱, 用户定调「免费的别要求太高」)。"""
+    if not prof or prof.get("error"): return 600
+    risk = prof.get("risk")
+    labels = " ".join(prof.get("labels") or [])
+    sk = risk if isinstance(risk, int) else 600
+    if "代理" in labels: sk += 50
+    return sk
+
 def test_one(px):
     for f in ("ts_token.txt", "ts_proxy.txt"):
         if os.path.exists(f): os.remove(f)
@@ -57,9 +95,32 @@ if __name__ == "__main__":
     # 修 09-10 诊断: 复验通过占满名额触发提前收工, 新 IP 根本轮不到试盾(good_pool 流干)。
     new_first = [p for p in cands if p not in good_set]
     reverify = [p for p in cands if p in good_set]
+    # ---- ping0 画像采集(09-12): 只对「新 IP」判死+排序, 复验 IP 不加新 kill 路径 ----
+    dropped_p0 = []
+    keyed = []
+    for px in new_first[:P0_PROFILE_MAX]:
+        prof = ping0_profile(px)
+        if p0_is_idc(prof):
+            lab = " ".join(prof.get("labels") or []) or str(prof.get("iptype") or "?")
+            dropped_p0.append(px)
+            print(f"[p0] ❌ {px} {lab} -> 跳过试盾直接判死", flush=True)
+            continue
+        sk = p0_sortkey(prof)
+        red = any("代理" in lb for lb in (prof.get("labels") or []))
+        tag = f"risk={prof.get('risk')}%" if isinstance(prof.get("risk"), int) else "无画像"
+        extra = " 代理红标" if red else ""
+        native = prof.get("native") or ""
+        if native: extra += f" {native}"
+        print(f"[p0] {'⚠️' if red else '▫️'} {px} {tag}{extra} 排序{sk}", flush=True)
+        keyed.append((sk, px))
+    # 超出 P0_PROFILE_MAX 的不采集, 按原顺序排尾
+    keyed.sort(key=lambda x: x[0])
+    new_first = [px for _, px in keyed] + new_first[P0_PROFILE_MAX:]
     cands = new_first + reverify
+    if dropped_p0:
+        print(f"[p0] ping0 机房/广播判死 {len(dropped_p0)} 个: " + ", ".join(dropped_p0), flush=True)
     if reverify:
-        print(f"[stage2] 复验 {len(reverify)} 个殿后, 新 IP {len(new_first)} 个优先", flush=True)
+        print(f"[stage2] 复验 {len(reverify)} 个殿后, 新 IP {len(new_first)} 个优先(已按风控排序)", flush=True)
     print(f"[stage2] {len(cands)} 个候选", flush=True)
     passed, passed_new, tested_n = [], 0, 0
     for i, px in enumerate(cands):
@@ -115,10 +176,11 @@ if __name__ == "__main__":
     fresh = [p for p in fresh if p not in set(demoted)]
     for p in fail_good:
         meta.pop(p, None)
-    # 复验失败降级不进 dead(新候选失败才进 dead)
+    # 复验失败降级不进 dead(新候选失败才进 dead); ping0 机房/广播判死也进 dead(经实测画像)
     new_dead = [p for p in tested
                 if p not in passed and p not in dead and p not in set(demoted)
                 and p not in reserve_set]   # reserve 成员复验失败仍留 reserve(不判死)
+    new_dead += [p for p in dropped_p0 if p not in dead and p not in new_dead]
     if fail_good:
         print("[stage2] 复验失败, 降级 reserve(不拉黑): " + ", ".join(fail_good))
     files = {}
