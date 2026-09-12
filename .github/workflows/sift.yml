@@ -10,7 +10,7 @@ on:
 jobs:
   sift:
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 90   # 09-12: 70->90。改造后 stage2 会吃满 count 个候选(ping0画像+试盾)
     env:
       GIST_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
       CONFIG_KEY: ${{ secrets.CONFIG_KEY }}
