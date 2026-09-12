@@ -13,11 +13,12 @@ _CFG = _cfg()
 GIST_TOKEN = os.environ["GIST_TOKEN"]; GIST_ID = _CFG["GIST_ID"]
 BUDGET = int(os.environ.get("SIFT_COUNT", "10"))
 P0_PROFILE_MAX = int(os.environ.get("P0_PROFILE_MAX", "15"))   # 画像采集上限(护 job 预算)
-# 09-12: 50 -> 80s。实测新候选是慢速住宅代理(冷启动 Chrome 过隧道 40~60s), 50s 时
-# 7/9 全部超时 -> 画像全空 -> 排序全变 600, 风控排序形同失效。
-P0_TIMEOUT = int(os.environ.get("P0_TIMEOUT", "80"))           # 单个画像采集预算(秒)
-# 09-12: 试盾 110 -> 150s。同理, 慢代理 110s 内常拿不到 token(4/9 超时)。
-TRY_TIMEOUT = int(os.environ.get("TRY_TIMEOUT", "150"))
+# 09-12: 80 -> 110s。慢速住宅代理 ping0 冷启动, 80s 常采不完(画像空->排序600)。
+P0_TIMEOUT = int(os.environ.get("P0_TIMEOUT", "110"))          # 单个画像采集预算(秒)
+# 09-12 晚: 110 -> 150 -> 300s。三轮实测(run 34700064422)候选页面打开就花 134s,
+# 150s 预算一到位就被杀, 根本没机会点击解验证码。候选本来就 0~1 个/轮,
+# 300s 不会拖爆 job(有 JOB_BUDGET 护栏兜底), 却让慢住宅代理真能跑完 Turnstile。
+TRY_TIMEOUT = int(os.environ.get("TRY_TIMEOUT", "300"))
 # job 级时间护栏: 超过这个已用秒数就不再开新候选, 保证已过盾的结果能写回 Gist
 JOB_BUDGET = int(os.environ.get("STAGE2_BUDGET", str(70 * 60)))
 P0_DROP_KW = ("机房", "IDC", "数据中心", "广播")               # 唯一硬淘汰信号
