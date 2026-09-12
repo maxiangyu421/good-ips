@@ -33,15 +33,16 @@ def read_token(sb):
 
 def try_one(px):
     from seleniumbase import SB
-    # 09-12 灰度: UC_PLS=normal/eager/none -> 传给 SB 的 pageLoadStrategy。
-    # 动机: 实测慢速住宅代理下 uc_open_with_reconnect() 会整个卡死 150s(连一行
-    # 「初始 token_len」都打不出来) —— 卡在「打开注册页」而不是点击 Turnstile。
-    # 默认 normal = chromedriver 等 load 事件; eager/none 不等子资源, 有机会走完流程。
-    pls = os.environ.get("UC_PLS", "").strip()
+    # 09-12 灰度实测(probe run 34689810547, 同一代理同一 runner 对照):
+    #   default(normal) -> uc_open_with_reconnect() 卡死, 90s 被杀, 页面都没打开
+    #   eager           -> 页面 6.2s 打开, 点击 2 轮拿到 token, 全程 37s ✅
+    # 原因: normal 要等 load 事件(Cloudflare SPA 的子资源在慢速住宅代理上拖死),
+    # eager 只等 DOMContentLoaded 就返回。这就是多轮 0 产出的真凶。
+    pls = os.environ.get("UC_PLS", "").strip() or "eager"
     kw = {"page_load_strategy": pls} if pls in ("normal", "eager", "none") else {}
     with SB(uc=True, locale="en", proxy=px,
             chromium_arg="--ignore-certificate-errors", **kw) as sb:
-        print("[uc] page_load_strategy=%s" % (pls or "SB默认(normal)"), flush=True)
+        print("[uc] page_load_strategy=%s" % pls, flush=True)
         t0 = time.time()
         sb.uc_open_with_reconnect(PAGE, reconnect_time=6)
         print("[uc] 页面打开返回, 耗时 %.1fs" % (time.time() - t0), flush=True)
