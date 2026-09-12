@@ -308,19 +308,31 @@ if __name__ == "__main__":
     # 现把「快到期」的 good IP 插队回炉, 过盾后 stage2 刷新 meta 续命;
     # 名额不挤占新 IP(stage2 名额只数新 IP)。窗口 (9h, 36h): 每轮测不完下轮继续, 不漏。
     REVERIFY_HOURS = int(os.environ.get("REVERIFY_HOURS", "9"))
-    _demote_h = int(os.environ.get("DEMOTE_HOURS", "12"))
     try:
         _meta = json.loads(gist_file("good_pool_meta.json") or "{}")
     except Exception:
         _meta = {}
     _now = int(time.time())
+    # 09-12 修: 原来窗口上界卡死 (_demote_h + 24) = 36h —— 但 meta 时间戳只在「过盾成功」时
+    # 刷新, 一个 IP 一旦掉进 reserve 就再没有事件能刷新它, 于是时间越久越出窗口, 36h 后
+    # 永久失去回炉资格。实测 36 个带 meta 的 reserve IP 里 34 个已出窗口(最久 92h),
+    # 全是曾经实打实过盾的 IP, 现在既不在 good 也回不来 —— 池子只出不进的第二个漏口。
+    # 回炉成本很低(1 次握手 + 1 次试盾), 试失败也只是原地留 reserve, 所以取消上界:
+    # 任何 reserve 成员只要 meta 超过 REVERIFY_HOURS 就有资格回炉, 按「最久没复验」优先。
     reverify = [p for p in good
-                if _meta.get(p)
-                and REVERIFY_HOURS * 3600 < _now - _meta.get(p) < (_demote_h + 24) * 3600]
+                if _meta.get(p) and _now - _meta.get(p) > REVERIFY_HOURS * 3600]
     # reserve 成员也回炉: 它们都是曾经过盾的 IP, 12h 断崖期被无辜降级的可借此复活(09-12)
     _res = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
     _resv = [p for p in _res if p not in reverify and _meta.get(p)
-             and REVERIFY_HOURS * 3600 < _now - _meta.get(p) < (_demote_h + 24) * 3600]
+             and _now - _meta.get(p) > REVERIFY_HOURS * 3600]
+    # 09-12: 每轮最多回炉 N 个(默认 6), 按「最久未复验」优先 —— 否则 30+ 个 reserve
+    # 一次全塞进队列会挤占新 IP 的握手/试盾预算(它们优先级在新 IP 之上)。
+    REVERIFY_MAX = int(os.environ.get("REVERIFY_MAX", "6"))
+    _resv.sort(key=lambda p: _meta.get(p, 0))
+    if len(_resv) > REVERIFY_MAX:
+        print(f"[sift] reserve 待回炉 {len(_resv)} 个, 本轮取最久未复验的 {REVERIFY_MAX} 个"
+              f"(其余下轮继续, 队列不挤爆)")
+        _resv = _resv[:REVERIFY_MAX]
     if _resv:
         print(f"[sift] reserve 复活复验 {len(_resv)} 个: " + ", ".join(_resv))
     reverify += _resv
