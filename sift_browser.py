@@ -6,7 +6,7 @@
   - 标「IDC机房/广播」的新 IP → 跳过试盾直接判死(省 110s 浏览器预算)
   - 其余按「风控值升序 + 代理红标降权」排序送盾(干净排前)
   - 复验 IP 不做 ping0 判死(不加新 kill 路径, 防重演 09-12 断崖); 画像仅参考"""
-import os, sys, subprocess, json, time
+import os, sys, subprocess, json, time, signal
 
 from cfg_open import load as _cfg
 _CFG = _cfg()
@@ -15,6 +15,28 @@ BUDGET = int(os.environ.get("SIFT_COUNT", "10"))
 P0_PROFILE_MAX = int(os.environ.get("P0_PROFILE_MAX", "15"))   # 画像采集上限(护 70min job 预算)
 P0_TIMEOUT = int(os.environ.get("P0_TIMEOUT", "50"))           # 单个画像采集预算(秒)
 P0_DROP_KW = ("机房", "IDC", "数据中心", "广播")               # 唯一硬淘汰信号
+
+def run_isolated(cmd, env, timeout):
+    """跑子进程, 超时杀整个进程组。
+    09-12: 原来用 subprocess.run(timeout=N) —— 它只杀直接子进程, 而这里是
+    xvfb-run(shell 脚本) -> python -> chromedriver -> chrome。
+    超时杀掉 xvfb-run 后, 底下的 chrome 全部变孤儿继续吃内存(每轮最多 40 次调用,
+    失败路径几乎都走超时), runner 上攒够就是 OOM/拖慢后续轮次。
+    用 start_new_session 让子进程自成进程组, 超时对整组 SIGKILL。"""
+    p = subprocess.Popen(cmd, env=env, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        p.wait(timeout=timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except Exception:
+            try: p.kill()
+            except Exception: pass
+        try: p.wait(timeout=10)
+        except Exception: pass
+        return False
 
 def jreq(url, method="GET", data=None, hdrs=None, timeout=20):
     import json, urllib.request as U
@@ -45,12 +67,9 @@ def ping0_profile(px):
     """uc_ping0.py 采集 ping0 出口画像(浏览器过挑战)。失败返回 {} 绝不抛。"""
     if os.path.exists("ping0_profile.json"): os.remove("ping0_profile.json")
     env = dict(os.environ, SINGLE_PROXY=px)
-    try:
-        subprocess.run(["xvfb-run", "-a", sys.executable, "uc_ping0.py"],
-                       env=env, timeout=P0_TIMEOUT, check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        print(f"[p0] {px} 采集超时({P0_TIMEOUT}s)", flush=True)
+    if not run_isolated(["xvfb-run", "-a", sys.executable, "uc_ping0.py"],
+                        env, P0_TIMEOUT):
+        print(f"[p0] {px} 采集超时({P0_TIMEOUT}s), 进程组已清理", flush=True)
     try:
         return json.load(open("ping0_profile.json"))
     except Exception:
@@ -76,12 +95,9 @@ def test_one(px):
     for f in ("ts_token.txt", "ts_proxy.txt"):
         if os.path.exists(f): os.remove(f)
     env = dict(os.environ, SINGLE_PROXY=px)
-    try:
-        subprocess.run(["xvfb-run", "-a", sys.executable, "uc_ts.py"],
-                       env=env, timeout=110, check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        print(f"[try] {px} 超时(110s)")
+    if not run_isolated(["xvfb-run", "-a", sys.executable, "uc_ts.py"],
+                        env, 110):
+        print(f"[try] {px} 超时(110s), 进程组已清理")
     tok = ""
     if os.path.exists("ts_token.txt"):
         tok = open("ts_token.txt").read().strip()
@@ -132,6 +148,30 @@ if __name__ == "__main__":
             passed.append(px)
             if px not in good_set:
                 passed_new += 1
+                # 09-12: 增量落盘。原来只在整轮结束时一次性 PATCH, 中途超时/job 取消
+                # (70min 限额贴边时常见) = 本轮所有过盾成果蒸发, 且 meta 时间戳没刷新,
+                # 这批 IP 还会被当成「未复验」降级。过一个就写一次, 最坏只丢最后一个。
+                try:
+                    gnow = [l.strip() for l in gist_file("good_pool.txt").splitlines()
+                            if l.strip()]
+                    if px not in gnow:
+                        if not gnow:
+                            # 池子为空: 顺带清掉 dead 里可能存在的同 IP
+                            gnow = [px]
+                        else:
+                            gnow = [px] + gnow
+                        mraw = gist_file("good_pool_meta.json")
+                        try: mnow = json.loads(mraw) if mraw else {}
+                        except Exception: mnow = {}
+                        mnow[px] = int(time.time())
+                        inc = {"good_pool.txt": {"content": "\n".join(gnow)},
+                               "good_pool_meta.json": {"content": json.dumps(mnow)}}
+                        if not (gist_file("good_proxy.txt").strip()):
+                            inc["good_proxy.txt"] = {"content": px + "\n"}
+                        gist_patch(inc)
+                        print(f"[gist] 增量落盘 {px} (good_pool {len(gnow)})", flush=True)
+                except Exception as e:
+                    print(f"[gist] 增量落盘失败(不影响主流程): {str(e)[:90]}", flush=True)
         else:
             print(f"[try] ❌ {px}", flush=True)
         if passed_new >= 4:   # 每轮最多收 4 个「新」优质; 复验通过不占名额不触发收工
@@ -185,7 +225,11 @@ if __name__ == "__main__":
         print("[stage2] 复验失败, 降级 reserve(不拉黑): " + ", ".join(fail_good))
     files = {}
     if new_good or demoted:
-        files["good_pool.txt"] = {"content": "\n".join(new_good + fresh)}   # 无上限(09-07 用户要求), 面板翻页展示
+        # 09-12 fix: 空 content PATCH「已存在」的文件 = GitHub 直接删除该文件(实测 200),
+        # 整个 good_pool 会消失; 而 content 为空 PATCH「不存在」的文件 = 422 整个 patch 全丢。
+        # 触发场景: 一轮内所有 good 全超 DEMOTE_HOURS 降级且无新过盾 -> new_good+fresh 为空。
+        # 兜底写 "\n" 保留文件(panel._patch_gist 早有同样兜底, 这里原先漏了)。
+        files["good_pool.txt"] = {"content": ("\n".join(new_good + fresh)) or "\n"}   # 无上限(09-07 用户要求), 面板翻页展示
         reserve = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
         # 09-12 卫生: 已经回到 good 的 IP 不再留在 reserve(清掉跨池重复)
         reserve = [p for p in reserve if p not in set(new_good + fresh)]
