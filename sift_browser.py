@@ -164,7 +164,7 @@ def test_one(px, idx=0):
 if __name__ == "__main__":
     print_env_versions()
     cands = [l.strip() for l in open("sifted.txt") if l.strip()][:BUDGET]
-    good = [l.strip() for l in gist_file("good_pool.txt").splitlines() if l.strip()]
+    good = list(dict.fromkeys(l.strip() for l in gist_file("good_pool.txt").splitlines() if l.strip()))
     good_set = set(good)
     # 09-12 fix: 新 IP 排前、已 good 的复验殿后; 「4 个名额」只数新 IP ——
     # 修 09-10 诊断: 复验通过占满名额触发提前收工, 新 IP 根本轮不到试盾(good_pool 流干)。
@@ -321,7 +321,10 @@ if __name__ == "__main__":
         # 兜底写 "\n" 保留文件(panel._patch_gist 早有同样兜底, 这里原先漏了)。
         for p in restore:            # 09-12: 复活的 IP 也要刷新 meta 计时, 否则立刻又被降级
             meta[p] = now_ts
-        files["good_pool.txt"] = {"content": ("\n".join(new_good + restore + fresh)) or "\n"}   # 无上限(09-07 用户要求), 面板翻页展示
+        # 09-12 卫生: good_pool 全量去重(输入 good 可能已含历史重复, 复验/增量写攒出来的),
+        # 重复条目会稀释注册机置顶权重, 也没必要。去重保序。
+        gfinal = list(dict.fromkeys(new_good + restore + fresh))
+        files["good_pool.txt"] = {"content": ("\n".join(gfinal)) or "\n"}   # 无上限(09-07 用户要求), 面板翻页展示
         reserve = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
         # 09-12 卫生: 已经回到 good 的 IP 不再留在 reserve(清掉跨池重复)
         reserve = [p for p in reserve if p not in set(new_good + fresh + restore)]
