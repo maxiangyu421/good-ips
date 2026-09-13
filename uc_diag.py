@@ -69,7 +69,11 @@ CROP_JS = r"""
 """
 
 def snap(sb):
-    try: return sb.execute_script(SNAP_JS)
+    try:
+        r = sb.execute_script(SNAP_JS)
+        if isinstance(r, dict):
+            return r
+        return {"err": "execute_script 返回 %r" % (r,)}
     except Exception as e:
         return {"err": str(e)[:120]}
 
@@ -85,6 +89,7 @@ def main():
         t0 = time.time()
         sb.uc_open_with_reconnect(PAGE, reconnect_time=6)
         print("[diag] 页面打开耗时 %.1fs url=%s" % (time.time()-t0, getattr(sb, "current_url", "?")[:80]), flush=True)
+        t0 = time.time()  # 观测计时从页面打开后才起算, 慢代理开页时间不吃掉观测窗口
         clicked = False
         i = 0
         while time.time() - t0 < total:
