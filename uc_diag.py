@@ -45,6 +45,9 @@ SNAP_JS = r"""
     const ti = document.querySelector('input[name="%s"]');
     out.tokenLen = ti ? (ti.value || '').length : -1;
   } catch(e) { out.tokenLen = -2; }
+  out.url = (location.href || '').slice(0, 120);
+  try { out.title = (document.title || '').slice(0, 90); } catch(e) {}
+  try { out.bodyLen = document.body ? document.body.innerHTML.length : -1; } catch(e) { out.bodyLen = -2; }
   return out;
 }
 """ % TOKEN_INPUT
@@ -95,9 +98,10 @@ def main():
         while time.time() - t0 < total:
             i += 1
             s = snap(sb)
-            print("[diag] t+%03ds snap%d: iframes=%d widgets=%d tokenLen=%s" % (
+            errtag = (" url=%s bodyLen=%s ERR=%s" % (s.get("url", "?"), s.get("bodyLen", "?"), s.get("err", ""))) if (s.get("err") or s.get("url")) else ""
+            print("[diag] t+%03ds snap%d: iframes=%d widgets=%d tokenLen=%s%s" % (
                 time.time()-t0, i, len(s.get("iframes", [])), len(s.get("widgets", [])),
-                s.get("tokenLen")), flush=True)
+                s.get("tokenLen"), errtag[:260]), flush=True)
             for w in s.get("widgets", []):
                 print("      widget: %s cls=%s rect=%s shadow=%s" % (
                     w.get("tag"), (w.get("cls") or "")[:50], w.get("rect"), w.get("hasShadow")), flush=True)
