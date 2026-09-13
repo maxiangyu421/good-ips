@@ -16,7 +16,6 @@ if not PAGE:
     print("[diag] 缺 TARGET_URL"); sys.exit(2)
 
 SNAP_JS = r"""
-() => {
   const out = {iframes: [], widgets: [], tokenLen: 0, inputs: []};
   const seen = new Set();
   function walk(root, depth) {
@@ -49,11 +48,9 @@ SNAP_JS = r"""
   try { out.title = (document.title || '').slice(0, 90); } catch(e) {}
   try { out.bodyLen = document.body ? document.body.innerHTML.length : -1; } catch(e) { out.bodyLen = -2; }
   return out;
-}
 """ % TOKEN_INPUT
 
 CROP_JS = r"""
-(sel) => {
   function find(root, depth) {
     if (!root || depth > 8) return null;
     let els = []; try { els = root.querySelectorAll('*'); } catch(e) { return null; }
@@ -68,7 +65,6 @@ CROP_JS = r"""
     return null;
   }
   return find(document, 0);
-}
 """
 
 def snap(sb):
