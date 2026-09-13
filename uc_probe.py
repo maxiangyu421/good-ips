@@ -7,6 +7,8 @@
   - PROBE_LIST: 逗号分隔 host:port
   - PROBE_ARMS: 逗号分隔 策略:超时秒; 策略 default = 不设 UC_PLS(SB 默认 normal),
     legacy = UC_TS_LEGACY=1(回跑 uc_ts v1 逻辑) + eager, 其余名字 = UC_PLS 值(v2 流程)。
+  - PROBE_SCRIPT: 要跑的脚本, 默认 uc_ts.py; 切诊断探针传 uc_diag.py
+    (探针自身的观测参数走其 env: DIAG_TOTAL / DIAG_CLICK_AT, 透传即可)。
 """
 import os, signal, subprocess, sys, time
 
@@ -47,7 +49,8 @@ def main():
         arms.append((name or "default", int(tmo or 150)))
     if not proxies:
         print("[probe] PROBE_LIST 为空, 无事可做"); return
-    print("[probe] 代理 %s × 策略 %s" % (proxies, arms), flush=True)
+    script = os.environ.get("PROBE_SCRIPT", "uc_ts.py").strip() or "uc_ts.py"
+    print("[probe] 脚本 %s | 代理 %s × 策略 %s" % (script, proxies, arms), flush=True)
 
     rows = []
     for px in proxies:
@@ -63,7 +66,7 @@ def main():
                 env["UC_PLS"] = arm
             print("\n===== %s × %s (超时 %ds) =====" % (px, arm, tmo), flush=True)
             ok, used, out = run(["xvfb-run", "-a", "-s", "-screen 0 1280x1024x24",
-                                 sys.executable, "uc_ts.py"], env, tmo)
+                                 sys.executable, script], env, tmo)
             for line in [l.rstrip() for l in out.splitlines() if l.strip()][-14:]:
                 print("[sub] " + line[:220], flush=True)
             tok = ""
@@ -75,7 +78,8 @@ def main():
                     suf = f[len("uc_debug"):].lstrip("_") or "fail"
                     try: os.rename(f, "probe_%s_%s_%s" % (px.replace(":", "_"), arm, suf))
                     except Exception: pass
-            st = ("✅ token_len=%d" % len(tok)) if tok else ("⏱ 超时" if not ok else "❌ 无 token")
+            st = ("✅ token_len=%d" % len(tok)) if tok else (
+                "✅ TOKEN_OK(diag)" if "TOKEN_OK" in out else ("⏱ 超时" if not ok else "❌ 无 token"))
             rows.append((px, arm, st, used))
             print("[probe] 结果 %s × %s -> %s (%.0fs)" % (px, arm, st, used), flush=True)
 

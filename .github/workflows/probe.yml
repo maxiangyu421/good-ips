@@ -10,6 +10,15 @@ on:
       arms:
         description: "策略:超时秒, 逗号分隔(default=SB 默认 normal)"
         default: "default:90,eager:150"
+      script:
+        description: "探针脚本(uc_ts.py 或 uc_diag.py)"
+        default: "uc_ts.py"
+      diag_total:
+        description: "uc_diag 总观测秒数"
+        default: "120"
+      diag_click_at:
+        description: "uc_diag 第几秒点击"
+        default: "15"
 jobs:
   probe:
     runs-on: ubuntu-latest
@@ -18,6 +27,9 @@ jobs:
       CONFIG_KEY: ${{ secrets.CONFIG_KEY }}
       PROBE_LIST: ${{ inputs.proxies }}
       PROBE_ARMS: ${{ inputs.arms }}
+      PROBE_SCRIPT: ${{ inputs.script }}
+      DIAG_TOTAL: ${{ inputs.diag_total }}
+      DIAG_CLICK_AT: ${{ inputs.diag_click_at }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
