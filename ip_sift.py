@@ -14,10 +14,15 @@ GIST_ID = _CFG["GIST_ID"]
 BROWSER_N = int(os.environ.get("SIFT_COUNT", "15"))   # 交给阶段2浏览器实测的数量
 GIST_FILE = "dead_pool.txt"  # 只读; good_pool.txt 由阶段2写
 
-# ---- 源分级(09-12, 实测驱动): 免费列表的"大"与"活"完全不成正比 ----
-# 实测各源真实存活率(每源抽 350 个唯一 IP, 沙盒):
-#   monosans 41.1% / hookzof 40.5% / proxifly 38.1% / casals-ar 17.4% / TheSpeedX 15.4%
-#   MuRongPIG  0.29%  <-- 71602 个唯一 IP, 占候选池 96%, 却几乎全是僵尸
+# ---- 源分级(09-12 建, 09-15 用新实测数据重排) ----
+# 09-15 重测(每源抽 250, SOCKS5 半开握手, 沙盒):
+#   Zaeem20 22.7% / casals-ar 22.0% / jetkai 17.6% / monosans 17.2% / TheSpeedX 11.6%
+#   dpangestuw 10.8% / proxyspace 10.0% / hookzof 6.0% / proxifly 4.8%
+#   ⚠️ 09-12 记的「monosans 41% / hookzof 40% / proxifly 38%」已完全失效——proxifly/hookzof
+#   掉到 5~6%, casals-ar/Zaeem20 反成头部。存活率是时效量, 别把旧排序当常量。
+# 但本文件的策略不依赖单源排名: 小源"全量进队列"的设计对排名漂移是免疫的,
+# 排名只影响谁先被 6000 预算吃到。真正要修的是下面「大源」的定义。
+# 原始实测(09-12): MuRongPIG 0.29% 存活 71602 个唯一 IP, 占候选池 96%, 几乎全是僵尸。
 # 后果: 原来对全池均匀随机抽 6000 个, 96% 的探测预算扔在僵尸列表上 —
 #   实测 6004 个只活 154 -> 住宅白名单 2 / 普通 0;
 #   而小源全量 8046 个活 409 -> 住宅白名单 78 / 普通 53 (可用候选 2 -> 131)。
@@ -34,10 +39,21 @@ SMALL_SOURCES = [
     "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt",
     "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/socks5.txt",
     "https://proxyspace.pro/socks5.txt",
+    # ---- 09-15 新增(GitHub 横评实测挑出; 详见 shared/good-ips/tools/per_source_survival.py) ----
+    # hproxy 实测 22.0% 存活(1060 池), 与我们最好源持平, 优先加
+    "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/refs/heads/main/socks5.txt",
+    # dinoz0rg 只收「已验活」子集(checked_proxies), 实测 10.0%
+    "https://raw.githubusercontent.com/dinoz0rg/proxy-list/refs/heads/main/checked_proxies/socks5.txt",
+    # openproxylist 实测 8.0%(3395 池), 量足可补尾部
+    "https://openproxylist.xyz/socks5.txt",
 ]
 BIG_SOURCES = [
     # 大源: 十万级僵尸列表, 只做尾部填充(候选不足时才轮到)
     "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt",
+    # 09-15 实测 4.8%/8361 池 —— 与 MuRongPIG 同性质的僵尸大源, 一律尾部
+    "https://raw.githubusercontent.com/ObcbO/getproxy/refs/heads/master/file/socks5.txt",
+    # 09-15 实测 4.0%/8965 池, 同上
+    "https://raw.githubusercontent.com/TuanMinPay/live-proxy/refs/heads/master/socks5.txt",
 ]
 SOURCES = SMALL_SOURCES + BIG_SOURCES   # 兼容: 仍可按全量遍历
 
@@ -257,6 +273,28 @@ def ipis_check(pxs):
 # stage1 无头隧道已被 ping0 Turnstile 全量挑战封死(实测直连/代理 100% 挑战页),
 # 改由 stage2 真浏览器顺路采集(挑战自动过, 与人工 Firefox 一致), 见 sift_browser.py。
 
+# ===== 闸门 B: sockS5 全量取回(09-15) =====
+# 官方校准数据: probe run 34988528820 —— N=800 同批候选, 半开握手过 178(22.2%),
+# 全量取回过 42(5.2%); 两者都过仅 15, 仅半开过 163(假活 91.6%), 仅全量过 27(反向误杀)。
+# ⚠️ 所以这道闸不是「单调收窄」而是「换一批代理」: 必须同时看 S1_FULL_GATE=1 前后
+# 的【送盾数 + 过盾率】, 只看通过率下降会误判成退化。
+S1_FULL_GATE = os.environ.get("S1_FULL_GATE", "0") == "1"
+GATE_ON = S1_FULL_GATE
+FULL_TMO = float(os.environ.get("S1_FULL_TMO", "10"))
+GATE_THREADS = int(os.environ.get("S1_GATE_THREADS", "256"))
+FULL_CHECK_HOST = os.environ.get("S1_FULL_HOST", "api.ipify.org")
+_dns_cache = {}
+
+def gethostbyname_cached(h):
+    """隧道内建连只收 IP-ATYP, 目标域名只需解析一次, 缓存复用。"""
+    if h not in _dns_cache:
+        try:
+            _dns_cache[h] = socket.gethostbyname(h)
+        except Exception:
+            _dns_cache[h] = None
+    return _dns_cache[h]
+
+
 def socks5_ok(target, timeout=7):
     """完整握手 + 连通目标, 返回(是否可用, 延迟ms)。IP-ATYP 直连(实测这批代理拒域名ATYP)。"""
     host, port = target.split(":")[0], int(target.split(":")[1])
@@ -274,8 +312,80 @@ def socks5_ok(target, timeout=7):
     except Exception:
         return False, 0
 
-if __name__ == "__main__":
-    small_raw, big_raw = fetch_lists()
+def socks5_full_ok(target, timeout=None):
+    """闸门 B(09-15, 借鉴 monosans/proxy-scraper-checker): 隧道内**完整取回** HTTPS 响应体。
+    现行 socks5_ok 只 CONNECT 1.1.1.1:80 看回复码就放行 —— A/B 实测(run 34988528820,
+    N=800 on GitHub runner)显示它放进来的 178 个里只有 15 个能真跑完一次 HTTPS GET,
+    假活率 91.6%; 而全量幸存者 ip-api 住宅浓度 39% vs 11%(3.5x)。
+    注意: 本批代理拒域名 ATYP, 走 IP-ATYP 连接 -> SNI 必须手动设为域名, 否则证书校验挂在 IP 上。
+    返回 (是否可用, 延迟ms, 失败原因)。"""
+    timeout = timeout or FULL_TMO
+    host, port = target.split(":")[0], int(target.split(":")[1])
+    t0 = time.time()
+    try:
+        dst_ip = gethostbyname_cached(FULL_CHECK_HOST)
+        if not dst_ip:
+            return False, 0, "dns"
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.settimeout(timeout)
+        s.sendall(b"\x05\x01\x00")
+        if s.recv(2) != b"\x05\x00":
+            s.close(); return False, 0, "handshake"
+        s.sendall(b"\x05\x01\x00\x01" + socket.inet_aton(dst_ip) + struct.pack(">H", 443))
+        r = s.recv(64)
+        if len(r) < 2 or r[1] != 0:
+            s.close(); return False, 0, "connect"
+        ctx = ssl.create_default_context()
+        ts = ctx.wrap_socket(s, server_hostname=FULL_CHECK_HOST)
+        ts.settimeout(timeout)
+        ts.sendall(f"GET / HTTP/1.1\r\nHost: {FULL_CHECK_HOST}\r\n"
+                   f"User-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n".encode())
+        buf = b""
+        while len(buf) < 65536:
+            chunk = ts.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        ts.close()
+        head, _, body = buf.partition(b"\r\n\r\n")
+        if not head.startswith(b"HTTP/"):
+            return False, 0, "nohttp"
+        if b"200" not in head.split(b"\r\n")[0]:
+            return False, 0, "status"
+        if len(body) <= 3:
+            return False, 0, "empty"
+        return True, int((time.time() - t0) * 1000), ""
+    except ssl.SSLError:
+        return False, 0, "tls"
+    except Exception as e:
+        return False, 0, type(e).__name__.lower()[:12]
+
+
+def full_fetch_gate(alive_raw, results):
+    """在「握手存活」和「ip-api 质量筛」之间插入全量取回闸门。
+    返回 (幸存 [(ms,p)], 统计 dict)。S1_FULL_GATE=0 时原样放行(默认行为, 可回滚)。"""
+    if not GATE_ON:
+        return alive_raw, {"enabled": False}
+    cands = [p for _, p in alive_raw]
+    t0 = time.time()
+    with ThreadPoolExecutor(GATE_THREADS) as ex:
+        res = list(ex.map(socks5_full_ok, cands))
+    keep, reasons = [], {}
+    for p, (ok, ms, why) in zip(cands, res):
+        if ok:
+            keep.append((ms, p))
+        else:
+            reasons[why] = reasons.get(why, 0) + 1
+    keep.sort()
+    stat = {"enabled": True, "in": len(cands), "out": len(keep),
+            "secs": int(time.time() - t0),
+            "rate": round(100.0 * len(keep) / max(1, len(cands)), 1),
+            "reasons": dict(sorted(reasons.items(), key=lambda kv: -kv[1])),
+            "note": "A/B 校准: 沙盒 15.6% / runner 23.7% 通过率属正常区间"}
+    return keep, stat
+
+
+
     all_px = small_raw | big_raw
     print(f"[sift] 抓到 {len(all_px)} 个(去重后; 小源 {len(small_raw)} + 大源 {len(big_raw)})")
     dead = set(l.strip() for l in gist_file("dead_pool.txt").splitlines() if l.strip())
@@ -398,6 +508,17 @@ if __name__ == "__main__":
     for p in cand:
         if not results[p][0]:
             s1_fresh.add(p.split(":")[0])
+    # ---- 闸门 B(09-15): 握手存活 -> 全量取回, 滤掉「连得上但跑不完真实流量」的假活 ----
+    alive_raw, gate_stat = full_fetch_gate(alive_raw, results)
+    if gate_stat.get("enabled"):
+        print(f"[sift] 闸门B 全量取回: {gate_stat['in']} -> {gate_stat['out']} "
+              f"(通过率 {gate_stat['rate']}%, 耗时 {gate_stat['secs']}s)")
+        print(f"[sift]   失败原因: {gate_stat['reasons']}")
+        # 全量取回失败 = 代理本身不行 -> 记进 s1_dead(下轮不再重复握手), 但别误伤已 good 的
+        keep_hosts = {p.split(":")[0] for _, p in alive_raw}
+        for p in cand:
+            if results[p][0] and p.split(":")[0] not in keep_hosts:
+                s1_fresh.add(p.split(":")[0])
     # 同 IP 只留最快端口, 再送去查质量(省配额)
     seen0, dedup = set(), []
     for ms, p in alive_raw:
