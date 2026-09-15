@@ -5,6 +5,9 @@ on:
       count:
         description: "浏览器实测候选数(每个约1~2分钟)"
         default: "15"
+      full_gate:
+        description: "闸门B: stage1 全量取回(0=关/默认, 1=开)"
+        default: "0"
   schedule:
     - cron: "0 * * * *"   # 小时级兜底; 主驱动 = VPS 定时器 dispatch(45min, 无漂移)
 jobs:
@@ -15,6 +18,7 @@ jobs:
       GIST_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
       CONFIG_KEY: ${{ secrets.CONFIG_KEY }}
       SIFT_COUNT: ${{ inputs.count || '15' }}
+      S1_FULL_GATE: ${{ inputs.full_gate || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
