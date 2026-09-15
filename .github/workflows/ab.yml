@@ -1,0 +1,22 @@
+name: stage1-ab
+# 09-15 新增: stage1 判据 A/B 对照(半开握手 vs 完整取回响应体)。
+# 纯观测: 不读写任何 Gist / 池子文件, 只打印对照矩阵。可安全随意 dispatch。
+on:
+  workflow_dispatch:
+    inputs:
+      n:
+        description: "抽样候选数"
+        default: "800"
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AB_N: ${{ inputs.n }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: stage1 A/B 对照
+        run: python3 stage1_ab.py
