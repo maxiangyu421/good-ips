@@ -52,6 +52,10 @@ BIG_SOURCES = [
 ]
 SOURCES = SMALL_SOURCES + BIG_SOURCES   # 兼容: 仍可按全量遍历
 
+# 合法 ip:port 严格匹配(09-15): 首字符必须是数字防止 'x1080.1.2.3:80' 之类误配,
+# 后向断言确保端口后不跟数字/冒号(拦住 '1.2.3.4:1080167.5.6.7' 这种粘连)。
+_IPRE = re.compile(r"((?:\d{1,3}\.){3}\d{1,3}):(\d{1,5})(?![\d:])")
+
 def jreq(url, method="GET", data=None, hdrs=None, timeout=20):
     h = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
     if hdrs: h.update(hdrs)
@@ -81,8 +85,14 @@ def _pull(url, raw):
         if "://" in line: line = line.split("://", 1)[1]
         if "@" in line: line = line.split("@")[-1]      # user:pass@host:port
         line = line.split()[0]                           # 行尾带国家/延迟注释
-        if ":" in line and line.replace(".", "").replace(":", "").isdigit():
-            raw.add(line)
+        # 09-15: 旧判定 line.replace('.','').replace(':','').isdigit() 会放过
+        # '1080167.249.29.218:1080' 这类粘连脏数据(去掉点和冒号后确实是纯数字),
+        # 下游 socks5_ok 拿它 split(':')[1] 当端口 -> ValueError 崩掉整个线程池。
+        # 改用严格正则做边界匹配, 从源头上只放合法 ip:port。
+        m = _IPRE.match(line)
+        if m and 1 <= int(m.group(2)) <= 65535 \
+           and all(0 <= int(o) <= 255 for o in m.group(1).split(".")):
+            raw.add(f"{m.group(1)}:{int(m.group(2))}")
     return len(raw) - n0
 
 def fetch_lists():
@@ -295,7 +305,10 @@ def socks5_full_ok(target, timeout=None):
     """隧道内完整取回 HTTPS 响应体(monosans 式判据)。返回 (ok, ms, 失败原因)。
     注意: 本批代理拒域名 ATYP, 走 IP-ATYP -> SNI 必须手动设为域名。"""
     timeout = timeout or FULL_TMO
-    host, port = target.split(":")[0], int(target.split(":")[1])
+    parsed = _parse_target(target)
+    if parsed is None:
+        return False, 0, "badfmt"
+    host, port = parsed
     t0 = time.time()
     try:
         dst_ip = gethostbyname_cached(FULL_CHECK_HOST)
@@ -356,9 +369,29 @@ def full_fetch_gate(alive_raw):
                   "rate": round(100.0 * len(keep) / max(1, len(cands)), 1),
                   "reasons": dict(sorted(reasons.items(), key=lambda kv: -kv[1]))}
 
+def _parse_target(target):
+    """严格解析 host:port。09-15: 大源里混有 '1080167.249.29.218:1080' 这类粘连脏数据,
+    旧写法 target.split(':')[1] 会把整段当端口 -> int() 抛 ValueError 崩掉整个线程池
+    (实测 run 35031108761 就是这么挂的)。返回 (host, port) 或 None。"""
+    if target.count(":") != 1:
+        return None
+    host, _, ps = target.partition(":")
+    if not ps.isdigit():
+        return None
+    port = int(ps)
+    if not (1 <= port <= 65535):
+        return None
+    octs = host.split(".")
+    if len(octs) != 4 or not all(o.isdigit() and 0 <= int(o) <= 255 for o in octs):
+        return None
+    return host, port
+
 def socks5_ok(target, timeout=7):
     """完整握手 + 连通目标, 返回(是否可用, 延迟ms)。IP-ATYP 直连(实测这批代理拒域名ATYP)。"""
-    host, port = target.split(":")[0], int(target.split(":")[1])
+    parsed = _parse_target(target)
+    if parsed is None:
+        return False, 0
+    host, port = parsed
     t0 = time.time()
     try:
         s = socket.create_connection((host, port), timeout=timeout)
