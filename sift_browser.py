@@ -314,11 +314,20 @@ if __name__ == "__main__":
     fresh = [p for p in fresh if p not in set(demoted)]
     for p in fail_good:
         meta.pop(p, None)
-    # 复验失败降级不进 dead(新候选失败才进 dead); ping0 机房/广播判死也进 dead(经实测画像)
-    new_dead = [p for p in tested
-                if p not in passed and p not in dead and p not in set(demoted)
-                and p not in reserve_set]   # reserve 成员复验失败仍留 reserve(不判死)
-    new_dead += [p for p in dropped_p0 if p not in dead and p not in new_dead]
+    # ===== 09-25 用户决策: dead_pool 语义收窄 =====
+    # 旧语义: 任何「试盾没过」的候选都进 dead → 家宽瞬断被永久拉黑, 且 good_pool 里
+    #         40 个 IP 与 dead 重叠, 好 IP 被自己的黑名单锁死(实测 09-25)。
+    # 新语义: dead_pool 只收「画像判为机房/广播」的 IP(= dropped_p0, 唯一合法来源)。
+    #         家宽无论死活都不进 dead, 失败一律 → reserve, 保留复活通道。
+    new_dead = [p for p in dropped_p0 if p not in dead]
+    # 家宽新候选失败 → reserve(不再判死); 排除已是 good/reserve/dead 的
+    new_fail_to_reserve = [p for p in tested
+                           if p not in passed and p not in dead
+                           and p not in set(demoted) and p not in reserve_set
+                           and p not in new_dead]
+    if new_fail_to_reserve:
+        print(f"[stage2] 家宽失败 {len(new_fail_to_reserve)} 个 → reserve(不拉黑): "
+              + ", ".join(new_fail_to_reserve[:6]))
     if fail_good:
         print("[stage2] 复验失败, 降级 reserve(不拉黑): " + ", ".join(fail_good))
     files = {}
@@ -337,12 +346,19 @@ if __name__ == "__main__":
         # 09-12 卫生: 已经回到 good 的 IP 不再留在 reserve(清掉跨池重复)
         reserve = [p for p in reserve if p not in set(new_good + fresh + restore)]
         new_reserve = [p for p in demoted if p not in reserve]
-        reserve_all = (new_reserve + reserve)[:500]
+        reserve_all = (new_reserve + new_fail_to_reserve + reserve)[:500]
         # 09-08 fix: Gist PATCH 里新建空文件(content="")会 422 且整个 patch 被静默丢弃,
         # 此前导致所有"通过 N 个"的新 IP 从未入库。空 reserve 就不写这个文件。
         if reserve_all:
             files["reserve_pool.txt"] = {"content": "\n".join(reserve_all)}
         files["good_pool_meta.json"] = {"content": json.dumps(meta)}
+    # 09-25: 家宽失败入 reserve 的场景可能不经过 good 段(本轮无 new_good/demoted/restore),
+    # 需要独立补写, 否则这轮的家宽失败 IP 会凭空消失。
+    if new_fail_to_reserve and "reserve_pool.txt" not in files:
+        reserve = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
+        reserve_all = list(dict.fromkeys(new_fail_to_reserve + reserve))[:500]
+        if reserve_all:
+            files["reserve_pool.txt"] = {"content": "\n".join(reserve_all)}
     if new_dead:
         files["dead_pool.txt"] = {"content": "\n".join((new_dead + dead)[:2000])}
     # 种子队列跑过就清掉本轮已测的, 避免下轮重复烧预算
