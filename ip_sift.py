@@ -435,6 +435,12 @@ if __name__ == "__main__":
         dead_hosts_cnt[h] = dead_hosts_cnt.get(h, 0) + 1
     ban_hosts = {h for h, n in dead_hosts_cnt.items() if n >= 3}
     good_hosts = {p.split(":")[0] for p in good}
+    # 09-25: 豁免集合(供 _ok 使用) —— reserve 成员同样豁免拉黑
+    try:
+        reserve_set = set(l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip())
+    except Exception:
+        reserve_set = set()
+    _exempt_hosts = good_hosts | {p.split(":")[0] for p in reserve_set}
     # 09-12 回炉通道: 删明星机制后 good IP 被 good_hosts 整体排除出候选,
     # 永远无法复验 -> meta 时间戳永不刷新 -> 12h 保鲜变全员死刑(good_pool 30→5 断崖根因)。
     # 现把「快到期」的 good IP 插队回炉, 过盾后 stage2 刷新 meta 续命;
@@ -471,11 +477,19 @@ if __name__ == "__main__":
     if reverify:
         print(f"[sift] 回炉复验 {len(reverify)} 个(超{REVERIFY_HOURS}h未复验): "
               + ", ".join(reverify))
+    # 09-25 用户决策: good/reserve 成员豁免 dead_pool 拉黑。
+    # 背景(实测 09-25): good_pool 93 个里有 40 个 IP 同时躺在 dead_pool, 其中 58.187.104.62
+    # 已达 3 端口并触发 ban_hosts 整段拉黑 —— 好 IP 被自己的黑名单锁死, 逻辑死结。
+    # dead_pool 现在语义已收窄为「机房/广播 IP」, 不该反过来钳制已验证的家宽。
+    _exempt = set(good) | reserve_set
     def _ok(p):
+        h = p.split(":")[0]
+        if p in _exempt or h in _exempt_hosts:
+            return True          # 已验证过的, 不受 dead/ban/s1_dead 影响
         return (p not in dead and p not in good
-                and p.split(":")[0] not in ban_hosts
-                and p.split(":")[0] not in good_hosts
-                and p.split(":")[0] not in s1_dead)
+                and h not in ban_hosts
+                and h not in good_hosts
+                and h not in s1_dead)
     cand_small = [p for p in small_raw if _ok(p)]
     cand_big = [p for p in big_raw if _ok(p)]
     cand = cand_small + cand_big
@@ -567,7 +581,9 @@ if __name__ == "__main__":
     if ipis_dc:
         print("[sift] 已剔除机房: " + ", ".join(ipis_dc[:10]))
     # ---- stage1 死 IP 缓存写回(09-12): 只进 dead 的不写(good 里出现过的不误伤) ----
-    newly = [h for h in s1_fresh if h not in good_hosts]
+    # 09-25: reserve 成员同样不写 s1_dead(与 good 同等待遇, 避免已通过试盾的家宽被 24h 拉黑)
+    _s1_exempt = good_hosts | {p.split(":")[0] for p in reserve_set}
+    newly = [h for h in s1_fresh if h not in _s1_exempt]
     for h in newly:
         s1_dead[h] = _t_now
     if len(s1_dead) > S1_DEAD_CAP:
