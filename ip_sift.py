@@ -435,6 +435,12 @@ if __name__ == "__main__":
         dead_hosts_cnt[h] = dead_hosts_cnt.get(h, 0) + 1
     ban_hosts = {h for h, n in dead_hosts_cnt.items() if n >= 3}
     good_hosts = {p.split(":")[0] for p in good}
+    # 09-25: 豁免集合(供 _ok 使用) —— reserve 成员同样豁免拉黑
+    try:
+        reserve_set = set(l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip())
+    except Exception:
+        reserve_set = set()
+    _exempt_hosts = good_hosts | {p.split(":")[0] for p in reserve_set}
     # 09-12 回炉通道: 删明星机制后 good IP 被 good_hosts 整体排除出候选,
     # 永远无法复验 -> meta 时间戳永不刷新 -> 12h 保鲜变全员死刑(good_pool 30→5 断崖根因)。
     # 现把「快到期」的 good IP 插队回炉, 过盾后 stage2 刷新 meta 续命;
@@ -471,11 +477,19 @@ if __name__ == "__main__":
     if reverify:
         print(f"[sift] 回炉复验 {len(reverify)} 个(超{REVERIFY_HOURS}h未复验): "
               + ", ".join(reverify))
+    # 09-25 用户决策: good/reserve 成员豁免 dead_pool 拉黑。
+    # 背景(实测 09-25): good_pool 93 个里有 40 个 IP 同时躺在 dead_pool, 其中 58.187.104.62
+    # 已达 3 端口并触发 ban_hosts 整段拉黑 —— 好 IP 被自己的黑名单锁死, 逻辑死结。
+    # dead_pool 现在语义已收窄为「机房/广播 IP」, 不该反过来钳制已验证的家宽。
+    _exempt = set(good) | reserve_set
     def _ok(p):
+        h = p.split(":")[0]
+        if p in _exempt or h in _exempt_hosts:
+            return True          # 已验证过的, 不受 dead/ban/s1_dead 影响
         return (p not in dead and p not in good
-                and p.split(":")[0] not in ban_hosts
-                and p.split(":")[0] not in good_hosts
-                and p.split(":")[0] not in s1_dead)
+                and h not in ban_hosts
+                and h not in good_hosts
+                and h not in s1_dead)
     cand_small = [p for p in small_raw if _ok(p)]
     cand_big = [p for p in big_raw if _ok(p)]
     cand = cand_small + cand_big
@@ -496,22 +510,6 @@ if __name__ == "__main__":
         sys.exit(0)
     # 优先队列(种子+回炉复验)不参与 shuffle/截断, 保证一定被测到
     prio = seed + reverify
-    # ---- Cox 段保底(09-25 实测驱动) ----
-    # 实测: 14 个免费源全抓下来(12.8 万唯一 IP), Cox 段(AS22773)去重后只有 39 个;
-    # 但这 39 个在 VPS 上三轮 TCP 投票存活 38/39 = 97.4%(随机 200 个其他 IP 仅 11%),
-    # 真试盾 16 个出 3 个(18.75%, run 36122412509)。
-    # 它们体量极小(相对 12.8 万 = 0.03%)、存活率极高, 却极易被 shuffle+6000 预算漏掉
-    # —— 实测其中 35 个曾躺在 dead_pool(被自己的黑名单闷杀)。
-    # 所以: 命中该段的候选无条件插到队列最前(在 seed/reverify 之后, 常规 shuffle 之前),
-    # 保证每轮都被握手 + 送盾。成本可忽略(最多几十个)。
-    COX_PREFIX = ("72.195.", "184.178.", "184.181.", "98.175.", "98.188.",
-                  "98.178.", "70.166.", "72.223.")
-    _prior_all = set(prio)
-    cox_prio = [p for p in cand if p not in _prior_all and p.startswith(COX_PREFIX)]
-    cox_set = set(cox_prio)   # 供下方送盾排序复用(保底排首位)
-    if cox_prio:
-        print(f"[sift] Cox 段保底 {len(cox_prio)} 个插队(源里公认最强住宅段, 实测存活 97%)")
-    prio = prio + cox_prio
     # ---- 采样顺序(09-12 关键改造) ----
     # 小源(高存活率)全量排前, 大源(僵尸列表)shuffle 后只做尾部填充:
     # 同样 6000 次握手预算, 可用候选从 ~2 个变成 ~130 个。
@@ -570,26 +568,22 @@ if __name__ == "__main__":
     stage1 = _by_ms(prime) + _by_ms(normal) + _by_ms(unk0)
     ipis_res, ipis_dc, ipis_unk = ipis_check(stage1)
     prime_set, prio_set = set(prime), set(prio)
-    # 排序: Cox保底 > 优先队列(种子) > ISP白名单住宅 > 其他住宅 > 未知
-    # Cox 保底(09-25): 这批 IP 真过盾概率远高于池内均值(res_p 都是「已 good」的老 IP,
-    # 每轮复验通常全灭; Cox 段是源里没被吃过的活水), 所以排最前先吃浏览器预算。
-    # ⚠️ 注意 cox_set 的成员同时也在 prio_set 里(上方保底插队所致), 判定必须「先看 cox_set」,
-    #    否则会同时被 res_x(要求 not in prio_set) 和 res_p(被过滤掉 cox) 漏掉而凭空丢失。
-    res_x = [p for p in ipis_res if p in cox_set]
-    res_p = [p for p in ipis_res if p not in cox_set and p in prio_set]
-    res_a = [p for p in ipis_res if p not in cox_set and p not in prio_set and p in prime_set]
-    res_b = [p for p in ipis_res if p not in cox_set and p not in prio_set and p not in prime_set]
-    pre_pick = res_x + res_p + res_a + res_b + ipis_unk   # 机房(ipis_dc)已彻底出局
+    # 排序: 优先队列(种子) > ISP白名单住宅 > 其他住宅 > 未知
+    res_p = [p for p in ipis_res if p in prio_set]
+    res_a = [p for p in ipis_res if p not in prio_set and p in prime_set]
+    res_b = [p for p in ipis_res if p not in prio_set and p not in prime_set]
+    pre_pick = res_p + res_a + res_b + ipis_unk      # 机房(ipis_dc)已彻底出局
     # 三级半(ping0 画像)已迁往 stage2 浏览器采集(uc_ping0.py), stage1 到此为止
     picked = pre_pick[:BROWSER_N]
-    if res_x: print(f"[sift] Cox 保底 {len(res_x)} 个进食队列首位")
     if res_p: print(f"[sift] 优先队列命中 {len(res_p)} 个进送盾队列头部")
     alive = picked
     print(f"[sift] 送盾队列 {len(picked)} 个(画像采集/风控排序在 stage2 浏览器内做)")
     if ipis_dc:
         print("[sift] 已剔除机房: " + ", ".join(ipis_dc[:10]))
     # ---- stage1 死 IP 缓存写回(09-12): 只进 dead 的不写(good 里出现过的不误伤) ----
-    newly = [h for h in s1_fresh if h not in good_hosts]
+    # 09-25: reserve 成员同样不写 s1_dead(与 good 同等待遇, 避免已通过试盾的家宽被 24h 拉黑)
+    _s1_exempt = good_hosts | {p.split(":")[0] for p in reserve_set}
+    newly = [h for h in s1_fresh if h not in _s1_exempt]
     for h in newly:
         s1_dead[h] = _t_now
     if len(s1_dead) > S1_DEAD_CAP:
