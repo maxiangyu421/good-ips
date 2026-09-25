@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 55   # 09-12: 30->55, 容纳 v2/legacy 双臂 × 4 代理最坏 40min
     env:
       CONFIG_KEY: ${{ secrets.CONFIG_KEY }}
+      GIST_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
       PROBE_LIST: ${{ inputs.proxies }}
       PROBE_ARMS: ${{ inputs.arms }}
       PROBE_SCRIPT: ${{ inputs.script }}
@@ -38,6 +39,22 @@ jobs:
       - run: pip install seleniumbase pyautogui
       - name: 解密配置(不入库不打印)
         run: python3 cfg_open.py --write
+      - name: token 指纹诊断
+        run: |
+          python3 -c "
+          import os,json,urllib.request as U,hashlib
+          t=os.environ['GIST_TOKEN']
+          print('token_len',len(t))
+          print('sha256_16',hashlib.sha256(t.encode()).hexdigest()[:16])
+          print('prefix6',t[:6])
+          for name,u in [('user','https://api.github.com/user'),('gist','https://api.github.com/gists/a9bf7eaa80c95fb337c7320fd47773dd')]:
+              r=U.Request(u,headers={'Authorization':'token '+t,'User-Agent':'Mozilla/5.0','Content-Type':'application/json'})
+              try:
+                  with U.urlopen(r,timeout=20) as res:
+                      print(name,'status',res.status)
+              except Exception as e:
+                  print(name,'EXC',type(e).__name__,getattr(e,'code',None),str(e)[:150])
+          "
       - name: 灰度探针
         run: python3 uc_probe.py
       - name: Upload 失败截图(诊断用)
