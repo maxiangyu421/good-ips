@@ -289,6 +289,41 @@ if __name__ == "__main__":
         print(f"[stage2] reserve 复验通过, 复活回 good_pool: {', '.join(restore)}")
     # ---- 优质池保鲜(09-07): 记录每个 IP 最近一次过盾时间, 超 12h 未复验就降级去 reserve 池 ----
     # 免费代理寿命小时级, 死 IP 占名额会稀释抽样还烧 35s 超时; 降级不硬删(瞬断 IP 会复活)。
+def _vote_alive(cands, rounds=3, timeout=6, workers=24):
+    """三轮 TCP 连通投票（09-25 新增）。
+
+    动机: 旧逻辑「超 DEMOTE_HOURS 未复验 -> 直接降级」是凭时间戳猜死活。
+    实测 09-25: 被降级的 15 个里 13 个三轮都能连通 —— 时间戳不能 predict 可用性。
+    成本: 22 个并发 x 3 轮 = 18s; 对比真实试盾 35s/个 = 13 分钟, 便宜 40+ 倍。
+    判据: >= 2/3 轮连通记为存活（单轮噪声大, 实测同批两次跑能差 3 个）。
+    """
+    import socket as _sk
+    import concurrent.futures as _cf
+
+    def _one(p):
+        try:
+            h, pt = p.rsplit(":", 1)
+            c = _sk.create_connection((h, int(pt)), timeout=timeout)
+            c.close()
+            return p, True
+        except Exception:
+            return p, False
+
+    score = {}
+    for _ in range(max(1, rounds)):
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=min(workers, max(1, len(cands)))) as ex:
+                for p, ok in ex.map(_one, list(cands)):
+                    if ok:
+                        score[p] = score.get(p, 0) + 1
+        except Exception as e:
+            print("[vote] round err %s" % e)
+    need = max(1, (rounds + 1) // 2)
+    alive = [p for p in cands if score.get(p, 0) >= need]
+    dead = [p for p in cands if score.get(p, 0) < need]
+    return alive, dead
+
+
     DEMOTE_HOURS = int(os.environ.get("DEMOTE_HOURS", "12"))
     now_ts = int(time.time())
     meta_raw = gist_file("good_pool_meta.json")
@@ -299,16 +334,30 @@ if __name__ == "__main__":
     for p in new_good:
         meta[p] = now_ts
     fresh, demoted = [], []
+    stale = []
     for p in good:
         ts = meta.get(p)
         if ts and now_ts - ts > DEMOTE_HOURS * 3600:
-            demoted.append(p)
+            stale.append(p)
         else:
             if not ts:
                 meta[p] = now_ts   # 旧条目没时间戳, 从现在起算宽限期
             fresh.append(p)
-    if demoted:
-        print(f"[stage2] 超{DEMOTE_HOURS}h未复验, 降级 {len(demoted)} 个: " + ", ".join(demoted))
+    # ===== 09-25 用户决策: 超期不再凭时间戳直接降级, 先做三轮连通投票实测 =====
+    #   活 -> 留在 good_pool 并刷新 last_ok（不再被反复降级）
+    #   死 -> 降 reserve（仍不进 dead, 家宽不拉黑）
+    revived = []
+    if stale:
+        _alive, _dead = _vote_alive(stale)
+        revived, demoted = _alive, _dead
+        for p in revived:
+            meta[p] = now_ts       # 刷新, 下轮不会立刻再超期
+        print("[stage2] 超%d h %d 个 -> 三轮投票: 复活 %d / 降级 %d"
+              % (DEMOTE_HOURS, len(stale), len(revived), len(demoted)))
+        if revived:
+            print("[stage2]   复活: " + ", ".join(revived[:8]))
+        if demoted:
+            print("[stage2]   降级: " + ", ".join(demoted[:8]))
     # 复验失败的好 IP 一并降级(合并去重), 从 good/meta 里摘掉
     demoted = list(dict.fromkeys(demoted + fail_good))
     fresh = [p for p in fresh if p not in set(demoted)]
@@ -331,20 +380,22 @@ if __name__ == "__main__":
     if fail_good:
         print("[stage2] 复验失败, 降级 reserve(不拉黑): " + ", ".join(fail_good))
     files = {}
-    if new_good or demoted or restore:
+    if new_good or demoted or restore or revived:
         # 09-12 fix: 空 content PATCH「已存在」的文件 = GitHub 直接删除该文件(实测 200),
         # 整个 good_pool 会消失; 而 content 为空 PATCH「不存在」的文件 = 422 整个 patch 全丢。
         # 触发场景: 一轮内所有 good 全超 DEMOTE_HOURS 降级且无新过盾 -> new_good+fresh 为空。
         # 兜底写 "\n" 保留文件(panel._patch_gist 早有同样兜底, 这里原先漏了)。
         for p in restore:            # 09-12: 复活的 IP 也要刷新 meta 计时, 否则立刻又被降级
             meta[p] = now_ts
+        for p in revived:            # 09-25: 投票复活的同理(上文已刷新, 这里幂等保障)
+            meta[p] = now_ts
         # 09-12 卫生: good_pool 全量去重(输入 good 可能已含历史重复, 复验/增量写攒出来的),
         # 重复条目会稀释注册机置顶权重, 也没必要。去重保序。
-        gfinal = list(dict.fromkeys(new_good + restore + fresh))
+        gfinal = list(dict.fromkeys(new_good + restore + fresh + revived))   # 09-25: revived 也要写回(否则投票复活的 IP 会凭空丢失)
         files["good_pool.txt"] = {"content": ("\n".join(gfinal)) or "\n"}   # 无上限(09-07 用户要求), 面板翻页展示
         reserve = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
         # 09-12 卫生: 已经回到 good 的 IP 不再留在 reserve(清掉跨池重复)
-        reserve = [p for p in reserve if p not in set(new_good + fresh + restore)]
+        reserve = [p for p in reserve if p not in set(new_good + fresh + restore + revived)]
         new_reserve = [p for p in demoted if p not in reserve]
         reserve_all = (new_reserve + new_fail_to_reserve + reserve)[:500]
         # 09-08 fix: Gist PATCH 里新建空文件(content="")会 422 且整个 patch 被静默丢弃,
