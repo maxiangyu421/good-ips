@@ -181,8 +181,11 @@ if __name__ == "__main__":
     # ---- ping0 画像采集(09-12): 只对「新 IP」判死+排序, 复验 IP 不加新 kill 路径 ----
     dropped_p0 = []
     keyed = []
+    risk_new = {}   # 09-25: 风险率持久化(px -> risk%), 随过盾写进 good_pool_risk.json 给面板展示
     for px in new_first[:P0_PROFILE_MAX]:
         prof = ping0_profile(px)
+        if isinstance(prof.get("risk"), int):
+            risk_new[px] = prof["risk"]
         if p0_is_idc(prof):
             lab = " ".join(prof.get("labels") or []) or str(prof.get("iptype") or "?")
             dropped_p0.append(px)
@@ -252,6 +255,14 @@ if __name__ == "__main__":
                         try: mnow = json.loads(mraw) if mraw else {}
                         except Exception: mnow = {}
                         mnow[px] = int(time.time())
+                        # 09-25: 风险率随增量落盘(job 中途挂掉也不丢)
+                        if px in risk_new:
+                            try:
+                                _rr = json.loads(gist_file("good_pool_risk.json") or "{}")
+                            except Exception:
+                                _rr = {}
+                            _rr[px] = risk_new[px]
+                            inc["good_pool_risk.json"] = {"content": json.dumps(_rr)}
                         inc = {"good_pool.txt": {"content": "\n".join(gnow)},
                                "good_pool_meta.json": {"content": json.dumps(mnow)}}
                         if not (gist_file("good_proxy.txt").strip()):
@@ -391,8 +402,20 @@ def _vote_alive(cands, rounds=3, timeout=6, workers=24):
             meta[p] = now_ts
         # 09-12 卫生: good_pool 全量去重(输入 good 可能已含历史重复, 复验/增量写攒出来的),
         # 重复条目会稀释注册机置顶权重, 也没必要。去重保序。
+        # 09-25 卫生: good_pool 全量去重(输入 good 可能已含历史重复, 复验/增量写攒出来的),
+        # 重复条目会稀释注册机置顶权重, 也没必要。去重保序。
         gfinal = list(dict.fromkeys(new_good + restore + fresh + revived))   # 09-25: revived 也要写回(否则投票复活的 IP 会凭空丢失)
         files["good_pool.txt"] = {"content": ("\n".join(gfinal)) or "\n"}   # 无上限(09-07 用户要求), 面板翻页展示
+        # 09-25: 风险率持久化 —— ping0 风控值% 落进 good_pool_risk.json(面板每个 IP 展示)
+        # 只对「新 IP」采画像, 所以老 IP 无值显示「—」; 池外成员一律剪掉防膨胀。
+        try:
+            _rr = json.loads(gist_file("good_pool_risk.json") or "{}")
+        except Exception:
+            _rr = {}
+        for p in new_good:
+            if p in risk_new:
+                _rr[p] = risk_new[p]
+        files["good_pool_risk.json"] = {"content": json.dumps({p: _rr[p] for p in gfinal if p in _rr})}
         reserve = [l.strip() for l in gist_file("reserve_pool.txt").splitlines() if l.strip()]
         # 09-12 卫生: 已经回到 good 的 IP 不再留在 reserve(清掉跨池重复)
         reserve = [p for p in reserve if p not in set(new_good + fresh + restore + revived)]
