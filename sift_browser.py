@@ -355,8 +355,15 @@ if __name__ == "__main__":
     keyed.sort(key=lambda x: x[0])
     new_sorted = [px for _, px in keyed] + new_first[P0_PROFILE_MAX:]
     new_first = [px for px in new_sorted if px not in good_set]
+    # 09-26 fix(致命): 原第二项写作 `if px not in good_set` —— 而 reverify 本身就是从
+    # cands 里筛出的「good 成员」子集, 该条件恒为 False → reverify 每轮必被清空。
+    # 后果: ①回炉复验通道彻底死亡(good IP 永远不再复验/续期); ②stage1 的
+    # `picked = pre_pick[:BROWSER_N]` 把 prio(=种子+回炉复验)排在最前, 当 prio ≥ 15
+    # 时整条浏览器队列全是「已 good」老 IP → 本轮 new_first=0 → 打印「[stage2] 0 个候选」
+    # 空烧一整轮(实测 run 36229116302)。第二项本意是「new_sorted 里混进来的 good」兜底,
+    # 判据应是 `not in new_sorted`(new_sorted 只含 new_first, 正常恒为空)。
     reverify = [px for px in new_sorted if px in good_set] + \
-               [px for px in reverify if px not in good_set]
+               [px for px in reverify if px not in new_sorted]
     cands = new_first + reverify
     if dropped_p0:
         print(f"[ipis] ipapi.is 机房/IDC 判死 {len(dropped_p0)} 个: " + ", ".join(dropped_p0), flush=True)
