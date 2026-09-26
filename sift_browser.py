@@ -306,6 +306,42 @@ def test_one(px, idx=0):
             except Exception: pass
     return tok
 
+def _vote_alive(cands, rounds=3, timeout=6, workers=24):
+    """三轮 TCP 连通投票（09-25 新增）。
+
+    动机: 旧逻辑「超 DEMOTE_HOURS 未复验 -> 直接降级」是凭时间戳猜死活。
+    实测 09-25: 被降级的 15 个里 13 个三轮都能连通 —— 时间戳不能 predict 可用性。
+    成本: 22 个并发 x 3 轮 = 18s; 对比真实试盾 35s/个 = 13 分钟, 便宜 40+ 倍。
+    判据: >= 2/3 轮连通记为存活（单轮噪声大, 实测同批两次跑能差 3 个）。
+    """
+    import socket as _sk
+    import concurrent.futures as _cf
+
+    def _one(p):
+        try:
+            h, pt = p.rsplit(":", 1)
+            c = _sk.create_connection((h, int(pt)), timeout=timeout)
+            c.close()
+            return p, True
+        except Exception:
+            return p, False
+
+    score = {}
+    for _ in range(max(1, rounds)):
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=min(workers, max(1, len(cands)))) as ex:
+                for p, ok in ex.map(_one, list(cands)):
+                    if ok:
+                        score[p] = score.get(p, 0) + 1
+        except Exception as e:
+            print("[vote] round err %s" % e)
+    need = max(1, (rounds + 1) // 2)
+    alive = [p for p in cands if score.get(p, 0) >= need]
+    dead = [p for p in cands if score.get(p, 0) < need]
+    return alive, dead
+
+
+
 if __name__ == "__main__":
     print_env_versions()
     cands = [l.strip() for l in open("sifted.txt") if l.strip()][:BUDGET]
@@ -447,41 +483,6 @@ if __name__ == "__main__":
         print(f"[stage2] reserve 复验通过, 复活回 good_pool: {', '.join(restore)}")
     # ---- 优质池保鲜(09-07): 记录每个 IP 最近一次过盾时间, 超 12h 未复验就降级去 reserve 池 ----
     # 免费代理寿命小时级, 死 IP 占名额会稀释抽样还烧 35s 超时; 降级不硬删(瞬断 IP 会复活)。
-def _vote_alive(cands, rounds=3, timeout=6, workers=24):
-    """三轮 TCP 连通投票（09-25 新增）。
-
-    动机: 旧逻辑「超 DEMOTE_HOURS 未复验 -> 直接降级」是凭时间戳猜死活。
-    实测 09-25: 被降级的 15 个里 13 个三轮都能连通 —— 时间戳不能 predict 可用性。
-    成本: 22 个并发 x 3 轮 = 18s; 对比真实试盾 35s/个 = 13 分钟, 便宜 40+ 倍。
-    判据: >= 2/3 轮连通记为存活（单轮噪声大, 实测同批两次跑能差 3 个）。
-    """
-    import socket as _sk
-    import concurrent.futures as _cf
-
-    def _one(p):
-        try:
-            h, pt = p.rsplit(":", 1)
-            c = _sk.create_connection((h, int(pt)), timeout=timeout)
-            c.close()
-            return p, True
-        except Exception:
-            return p, False
-
-    score = {}
-    for _ in range(max(1, rounds)):
-        try:
-            with _cf.ThreadPoolExecutor(max_workers=min(workers, max(1, len(cands)))) as ex:
-                for p, ok in ex.map(_one, list(cands)):
-                    if ok:
-                        score[p] = score.get(p, 0) + 1
-        except Exception as e:
-            print("[vote] round err %s" % e)
-    need = max(1, (rounds + 1) // 2)
-    alive = [p for p in cands if score.get(p, 0) >= need]
-    dead = [p for p in cands if score.get(p, 0) < need]
-    return alive, dead
-
-
     DEMOTE_HOURS = int(os.environ.get("DEMOTE_HOURS", "12"))
     now_ts = int(time.time())
     meta_raw = gist_file("good_pool_meta.json")
